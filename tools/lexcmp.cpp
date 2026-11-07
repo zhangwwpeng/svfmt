@@ -2,10 +2,16 @@
 // in whitespace. Uses slang's raw lexer (no preprocessing, no parsing), so it
 // shares no code path with the formatter.
 //
+// Whitespace is significant in one place: `define and `pragma end at the end
+// of their line, so the line end that terminates them and every "\" line
+// continuation inside them are compared too. (Other directives take a fixed
+// number of tokens; a line end after them means nothing.)
+//
 // usage: svfmt-lexcmp <before.sv> <after.sv>
 // exit 0 if equivalent; 1 with a description of the first difference.
 
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -14,6 +20,7 @@
 
 #include "slang/diagnostics/Diagnostics.h"
 #include "slang/parsing/Lexer.h"
+#include "slang/syntax/SyntaxKind.h"
 #include "slang/text/SourceManager.h"
 #include "slang/util/BumpAllocator.h"
 
@@ -30,6 +37,10 @@ struct Item {
 
 std::string ReadFile(const char *path) {
   std::ifstream in(path, std::ios::binary);
+  if (!in) {
+    std::fprintf(stderr, "svfmt-lexcmp: cannot read %s\n", path);
+    std::exit(2);
+  }
   std::stringstream ss;
   ss << in.rdbuf();
   return ss.str();
@@ -41,10 +52,23 @@ std::vector<Item> Lex(SourceManager &sm, const std::string &text, const char *na
   SourceBuffer buffer = sm.assignText(name, text);
   Lexer lexer(buffer, alloc, diags, sm);
   std::vector<Item> items;
+  bool in_directive = false;
+  bool continued = false;  // the next line end follows a "\" continuation
+  auto end_directive = [&] {
+    if (in_directive) items.push_back({"DirectiveEnd", "", 0});
+    in_directive = false;
+  };
   while (true) {
     Token tok = lexer.lex();
     for (const auto &trivia : tok.trivia()) {
       switch (trivia.kind) {
+        case TriviaKind::EndOfLine:
+          if (continued) {
+            continued = false;
+          } else {
+            end_directive();
+          }
+          break;
         case TriviaKind::LineComment:
         case TriviaKind::BlockComment:
         case TriviaKind::DisabledText:
@@ -56,9 +80,30 @@ std::vector<Item> Lex(SourceManager &sm, const std::string &text, const char *na
           break;  // whitespace, newlines, line continuations
       }
     }
-    if (tok.kind == TokenKind::EndOfFile) break;
+    if (tok.kind == TokenKind::EndOfFile) {
+      end_directive();
+      break;
+    }
     items.push_back({std::string(toString(tok.kind)), std::string(tok.rawText()),
                      sm.getLineNumber(tok.location())});
+    if (tok.kind == TokenKind::LineContinuation) {
+      continued = true;
+      continue;
+    }
+    continued = false;
+    if (tok.kind == TokenKind::Directive &&
+        (tok.directiveKind() == slang::syntax::SyntaxKind::DefineDirective ||
+         tok.directiveKind() == slang::syntax::SyntaxKind::PragmaDirective)) {
+      end_directive();
+      in_directive = true;
+    }
+    // A block comment may hide a line end inside a directive.
+    for (const auto &trivia : tok.trivia()) {
+      if (trivia.kind == TriviaKind::BlockComment &&
+          trivia.getRawText().find('\n') != std::string_view::npos) {
+        end_directive();
+      }
+    }
   }
   return items;
 }

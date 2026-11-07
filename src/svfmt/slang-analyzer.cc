@@ -1256,6 +1256,8 @@ std::vector<std::string> StubDefinitions(std::string_view text,
     if (name.empty()) continue;
     Info &info = infos[name];
     // Arity: count top-level commas inside the argument list.
+    // slang accepts whitespace between a macro name and its arguments.
+    while (end < text.size() && (text[end] == ' ' || text[end] == '\t')) ++end;
     size_t call_end = end;
     if (end < text.size() && text[end] == '(') {
       int depth = 0, commas = 0;

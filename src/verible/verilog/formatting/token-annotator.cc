@@ -875,6 +875,13 @@ static WithReason<SpacingOptions> BreakDecisionBetween(
             "Macro definition body must start on same line (but may be "
             "line-continued)."};
   }
+  // svfmt: a `define ends at the end of its line; breaking anywhere in its
+  // header (e.g. a long formal argument list) would cut the definition.
+  // Verible wraps long argument lists here and breaks the macro.
+  if (svfmt::IsInside(left_context, SyntaxKind::DefineDirective) &&
+      svfmt::IsInside(right_context, SyntaxKind::DefineDirective)) {
+    return {SpacingOptions::kMustAppend, "A `define must stay on one line."};
+  }
 
   // Check for mandatory line breaks.
   if (left.format_token_enum == FTT::eol_comment ||

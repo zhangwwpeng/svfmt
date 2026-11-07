@@ -49,3 +49,9 @@ build/svfmt --dump_cst x.sv; build/svfmt --show_token_partition_tree x.sv
    09-lrm-examples found 1 crash (clause-21/ex-21-086.sv).
 5. Not yet mapped: clocking blocks, covergroup bins details, assertion and
    property bodies, DPI, bind, constraint details, randomize-with spacing.
+6. Known corpus leftovers (safe by default: --verify_convergence rejects
+   them, input echoed): `endif in the middle of a wrapped expression
+   (VeeR beh_lib.sv; Verible rejects it as a syntax error), and comments
+   after "`else // c" re-indenting between passes (rv_tracer te_reg.sv;
+   Verible has the same non-convergence). Reports: reports/round*/
+   (untracked).
