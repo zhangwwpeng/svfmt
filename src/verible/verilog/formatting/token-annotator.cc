@@ -127,8 +127,15 @@ static bool PairwiseNonmergeable(const PreFormatToken &ftoken) {
          ftoken.format_token_enum == FormatTokenType::keyword;
 }
 
+// slang cannot tell "pkg::t [3:0] x" from an indexed name, so the dimensions
+// of a named type are an ElementSelect inside a NamedType.
+static bool InNamedTypeSelect(const SyntaxTreeContext &context) {
+  return IsInside(context, SyntaxKind::ElementSelect) &&
+         IsInside(context, SyntaxKind::NamedType);
+}
+
 static bool InDeclaredDimensions(const SyntaxTreeContext &context) {
-  return IsInside(context, SyntaxKind::VariableDimension);
+  return IsInside(context, SyntaxKind::VariableDimension) || InNamedTypeSelect(context);
 }
 
 static bool InRangeLikeContext(const SyntaxTreeContext &context) {
@@ -435,8 +442,10 @@ static WithReason<int> SpacesRequiredBetween(
       right.TokenEnum() == '[') {
     // slang: '[' of a VariableDimension that belongs to a data type, not to
     // a declarator (unpacked dimensions).
-    if (DirectParentIs(right_context, SyntaxKind::VariableDimension) &&
-        AncestorKind(right_context, 1) != SyntaxKind::Declarator) {
+    if ((DirectParentIs(right_context, SyntaxKind::VariableDimension) &&
+         AncestorKind(right_context, 1) != SyntaxKind::Declarator) ||
+        (DirectParentIs(right_context, SyntaxKind::ElementSelect) &&
+         InNamedTypeSelect(right_context))) {
       // "type [packed...]" (space between type and packed dimensions)
       // avoid touching any expressions inside the packed dimensions
       return {1, "spacing before [packed dimensions] of declarations"};

@@ -24,7 +24,8 @@ enum class GroupKind : int {
   kInstantiationType,  // data type (+ parameter values) of a declaration
   kParenGroup,         // ( ... ) of a macro call
   kMacroArgList,       // macro call arguments and separators
-  kLast_ = kMacroArgList,
+  kCovergroupHeader,   // covergroup name (ports) @event ;
+  kLast_ = kCovergroupHeader,
 };
 
 inline constexpr slang::syntax::SyntaxKind G(GroupKind g) {
@@ -40,7 +41,7 @@ inline std::string_view GroupKindName(int tag) {
   static constexpr std::string_view kNames[] = {
       "kIfClause",          "kIfHeader",   "kIfBody",       "kElseBody",
       "kBegin",             "kEnd",        "kLoopHeader",   "kSubroutineHeader",
-      "kClassHeader",       "kInstantiationType", "kParenGroup", "kMacroArgList",
+      "kClassHeader",       "kInstantiationType", "kParenGroup", "kMacroArgList", "kCovergroupHeader",
   };
   return IsGroupTag(tag) ? kNames[tag - static_cast<int>(GroupKind::kIfClause)]
                          : std::string_view();

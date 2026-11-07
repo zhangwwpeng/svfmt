@@ -19,6 +19,7 @@
 #include <memory>
 #include <vector>
 
+#include "slang/syntax/SyntaxKind.h"
 #include "verible/common/formatting/format-token.h"
 #include "verible/common/formatting/token-partition-tree.h"
 #include "verible/common/formatting/tree-unwrapper.h"
@@ -94,6 +95,10 @@ class TreeUnwrapper final : public verible::TreeUnwrapper {
   void Visit(const verible::SyntaxTreeNode &node) final;
 
   void SetIndentationsAndCreatePartitions(const verible::SyntaxTreeNode &node);
+  // svfmt: second half of the slang-kind switch.
+  void SetIndentationsForOtherKinds(const verible::SyntaxTreeNode &node,
+                                    slang::syntax::SyntaxKind kind,
+                                    bool suppress_indentation);
 
   void ReshapeTokenPartitions(const verible::SyntaxTreeNode &node,
                               const FormatStyle &style,

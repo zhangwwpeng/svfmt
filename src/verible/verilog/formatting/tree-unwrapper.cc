@@ -237,6 +237,18 @@ static bool IsStatementKind(SyntaxKind k) {
   }
 }
 
+// Verible: kOpenRangeList directly in a kConcatenationExpression that is not
+// part of a coverage bin, a ternary, or a binary expression.
+static bool IsTopLevelConcatenation(const verible::SyntaxTreeContext &context) {
+  if (svfmt::IsInsideAnyOf(context, {SyntaxKind::CoverageBins,
+                                     SyntaxKind::ConditionalExpression})) {
+    return false;
+  }
+  return !svfmt::IsInsideIf(context, [](SyntaxKind k) {
+    return slang::syntax::BinaryExpressionSyntax::isKind(k);
+  });
+}
+
 static bool IsAssignmentExpressionKind(SyntaxKind k) {
   switch (k) {
     case SyntaxKind::AssignmentExpression:
@@ -888,6 +900,15 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
       case ListKind::UdpBody_portDecls:
         VisitIndentedSection(node, 0, PartitionPolicyEnum::kAlwaysExpand);
         return;
+      // kOpenRangeList of a concatenation that is a whole expression
+      case ListKind::ConcatenationExpression_expressions: {
+        if (IsTopLevelConcatenation(Context())) {
+          const int indent = suppress_indentation ? 0 : style_.indentation_spaces;
+          VisitIndentedSection(node, indent, PartitionPolicyEnum::kFitOnLineElseExpand);
+          return;
+        }
+        break;
+      }
       // kPackageImportList in a module header
       case ListKind::ModuleHeader_imports: {
         if (node.empty()) break;
@@ -1022,6 +1043,7 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
   // ---- Synthetic group nodes ----
   if (svfmt::IsGroupTag(tag)) {
     switch (static_cast<GroupKind>(tag)) {
+      case GroupKind::kCovergroupHeader:
       case GroupKind::kIfClause:
       case GroupKind::kIfHeader:
       case GroupKind::kLoopHeader:
@@ -1147,7 +1169,6 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
     case SyntaxKind::SolveBeforeConstraint:
     case SyntaxKind::DisableConstraint:
     case SyntaxKind::LoopConstraint:
-    case SyntaxKind::CovergroupDeclaration:
     case SyntaxKind::CoverageOption:
     case SyntaxKind::CoverageBins:
     case SyntaxKind::CoverCross:
@@ -1223,6 +1244,7 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
 
     // The following cases will always expand into their constituent
     // partitions:
+    case SyntaxKind::CovergroupDeclaration:
     case SyntaxKind::ModuleDeclaration:
     case SyntaxKind::ProgramDeclaration:
     case SyntaxKind::PackageDeclaration:
@@ -1308,6 +1330,22 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
       VisitIndentedSection(node, 0, PartitionPolicyEnum::kFitOnLineElseExpand);
       break;
 
+    // kExpression elements of a top-level concatenation are their own lines.
+    default:
+      if (DirectParentTag(Context()) == Tag(ListKind::ConcatenationExpression_expressions) &&
+          IsTopLevelConcatenation(Context())) {
+        VisitIndentedSection(node, 0, PartitionPolicyEnum::kFitOnLineElseExpand);
+        break;
+      }
+      SetIndentationsForOtherKinds(node, kind, suppress_indentation);
+      break;
+  }
+}
+
+void TreeUnwrapper::SetIndentationsForOtherKinds(const SyntaxTreeNode &node,
+                                                  SyntaxKind kind,
+                                                  bool suppress_indentation) {
+  switch (kind) {
     // kNetVariableAssignment inside a continuous assignment
     case SyntaxKind::AssignmentExpression: {
       if (DirectParentTag(Context()) == Tag(ListKind::ContinuousAssign_assignments)) {
@@ -2630,6 +2668,7 @@ void TreeUnwrapper::ReshapeTokenPartitions(
           }
         }
         break;
+      case ListKind::ConcatenationExpression_expressions:
       case ListKind::SimpleAssignmentPattern_items:
       case ListKind::StructuredAssignmentPattern_items:
         AttachSeparatorsToListElementPartitions(&partition);

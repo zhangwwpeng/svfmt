@@ -65,6 +65,6 @@ if(SVFMT_BUILD_TESTS)
     add_test(NAME verible_cases
              COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_verible_cases.py
                      $<TARGET_FILE:svfmt> ${CMAKE_CURRENT_SOURCE_DIR}/tests/verible_cases.jsonl
-                     --min-same 1260)
+                     --min-same 1540)
   endif()
 endif()

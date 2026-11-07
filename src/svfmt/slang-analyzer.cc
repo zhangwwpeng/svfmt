@@ -769,6 +769,22 @@ class SlangAnalyzer::Builder {
         Child(n.endBlockName, out);
         return true;
       }
+      case SyntaxKind::CovergroupDeclaration: {
+        const auto &n = node.as<CovergroupDeclarationSyntax>();
+        List(n.attributes, static_cast<int>(ListKind::CovergroupDeclaration_attributes), out);
+        Group(GroupKind::kCovergroupHeader, out, [&](SyntaxTreeNode &g) {
+          Tok(n.covergroup, g);
+          Tok(n.extends, g);
+          Tok(n.name, g);
+          Child(n.portList, g);
+          Child(n.event, g);
+          Tok(n.semi, g);
+        });
+        List(n.members, static_cast<int>(ListKind::CovergroupDeclaration_members), out);
+        Tok(n.endgroup, out);
+        Child(n.endBlockName, out);
+        return true;
+      }
       case SyntaxKind::ClassDeclaration: {
         const auto &n = node.as<ClassDeclarationSyntax>();
         List(n.attributes, static_cast<int>(ListKind::ClassDeclaration_attributes), out);
@@ -927,8 +943,25 @@ class SlangAnalyzer::Builder {
   void List(const ListT &list, int list_tag, SyntaxTreeNode &out) {
     // Empty lists are kept (Verible keeps empty item lists too): comments in
     // an empty body are indented relative to the list.
+    if (ListKindName(list_tag).ends_with("_attributes")) {
+      // Verible lexes "(* ... *)" as one TK_ATTRIBUTE token that, like a
+      // comment, is not part of the syntax tree.
+      for (size_t i = 0; i < list.getChildCount(); ++i) {
+        auto child = list.getChild(i);
+        if (!child.isNode()) continue;
+        const SyntaxNode &attr = *child.node();
+        Token first = attr.getFirstToken();
+        Token last = attr.getLastToken();
+        EmitTrivia(first, out);
+        if (TokenAtCursor(first).empty() || last.location().buffer() != buffer_) continue;
+        const size_t begin = static_cast<size_t>(Offset(cursor_));
+        const size_t end = last.location().offset() + last.rawText().size();
+        Emit(TK_ATTRIBUTE, contents_.substr(begin, end - begin));
+      }
+      return;
+    }
     if (list.empty()) {
-      if (!ListKindName(list_tag).ends_with("_attributes")) {
+      {
         out.AppendChild(std::make_unique<SyntaxTreeNode>(list_tag));
       }
       return;
@@ -1259,7 +1292,7 @@ absl::StatusOr<std::unique_ptr<SlangAnalyzer>> SlangAnalyzer::AnalyzeWithMode(
   analyzer->data_->FilterTokens([](const TokenInfo &t) {
     const int e = t.token_enum();
     return e != TK_SPACE && e != TK_NEWLINE && e != TK_EOL_COMMENT &&
-           e != TK_COMMENT_BLOCK && e != TK_LINE_CONT;
+           e != TK_COMMENT_BLOCK && e != TK_LINE_CONT && e != TK_ATTRIBUTE;
   });
   return analyzer;
 }
