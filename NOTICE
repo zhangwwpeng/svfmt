@@ -1,0 +1,13 @@
+svfmt
+=====
+
+src/verible/ and src/external_libs/ contain code from the Verible project
+(https://github.com/chipsalliance/verible), Copyright The Verible Authors,
+licensed under the Apache License 2.0 (src/verible/LICENSE). Files under
+src/verible/verilog/formatting/ (align.cc, formatter.cc, token-annotator.cc,
+tree-unwrapper.cc, comment-controls.cc) and src/main.cpp were modified to run
+on slang's syntax tree; modified regions are marked "svfmt:".
+
+tests/verible_cases.jsonl is extracted from Verible's formatter tests.
+
+third_party/slang is slang (https://github.com/MikePopoloski/slang), MIT.

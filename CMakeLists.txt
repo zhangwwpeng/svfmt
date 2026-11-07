@@ -1,40 +1,70 @@
 cmake_minimum_required(VERSION 3.20)
-project(svfmt LANGUAGES CXX C)
+project(svfmt LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-set(SLANG_INCLUDE_TESTS OFF CACHE BOOL "" FORCE)
+option(SVFMT_BUILD_TESTS "Build svfmt tests" ON)
+
+# --- Dependencies -----------------------------------------------------------
+
+# slang is consumed as a source dependency (git submodule). We only need the
+# core library: no slang tools, tests or docs.
 set(SLANG_INCLUDE_TOOLS OFF CACHE BOOL "" FORCE)
+set(SLANG_INCLUDE_TESTS OFF CACHE BOOL "" FORCE)
 set(SLANG_INCLUDE_DOCS OFF CACHE BOOL "" FORCE)
-
+set(SLANG_INCLUDE_PYLIB OFF CACHE BOOL "" FORCE)
 add_subdirectory(third_party/slang EXCLUDE_FROM_ALL)
 
-include_directories(
-    include
-    third_party/slang/include
-    ${CMAKE_CURRENT_BINARY_DIR}/third_party/slang/source
-)
+# Abseil: the ported Verible code uses it throughout. Prefer an installed copy.
+find_package(absl CONFIG QUIET)
+if(NOT absl_FOUND)
+  include(FetchContent)
+  set(ABSL_PROPAGATE_CXX_STD ON)
+  set(ABSL_BUILD_TESTING OFF)
+  FetchContent_Declare(absl
+    GIT_REPOSITORY https://github.com/abseil/abseil-cpp.git
+    GIT_TAG 20250814.1
+    GIT_SHALLOW ON)
+  FetchContent_MakeAvailable(absl)
+endif()
 
-add_library(svfmt_lib STATIC
-    src/FormatStyle.cpp
-    src/CommentControls.cpp
-    src/TokenAnnotator.cpp
-    src/Alignment.cpp
-    src/Formatter.cpp
-)
+# --- Ported Verible formatter (src/verible, namespace verible) ---------------
 
-target_include_directories(svfmt_lib PUBLIC
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-    $<INSTALL_INTERFACE:include>
-)
+file(GLOB_RECURSE VERIBLE_SOURCES CONFIGURE_DEPENDS src/verible/*.cc)
+file(GLOB_RECURSE SVFMT_SOURCES CONFIGURE_DEPENDS src/svfmt/*.cc)
 
-target_link_libraries(svfmt_lib PUBLIC slang::slang)
+add_library(svfmt_core STATIC ${VERIBLE_SOURCES} ${SVFMT_SOURCES})
+target_include_directories(svfmt_core PUBLIC src)
+target_link_libraries(svfmt_core PUBLIC
+  slang::slang
+  absl::check absl::die_if_null absl::log absl::status absl::statusor
+  absl::strings absl::str_format absl::flags absl::flags_parse absl::flags_usage
+  absl::node_hash_map absl::flat_hash_map absl::fixed_array absl::time absl::random_random
+  absl::failure_signal_handler absl::symbolize absl::log_initialize absl::log_globals)
 
-add_executable(svfmt src/Main.cpp)
-target_link_libraries(svfmt PRIVATE svfmt_lib)
+add_executable(svfmt src/main.cpp)
+target_link_libraries(svfmt PRIVATE svfmt_core absl::log_initialize)
 
-enable_testing()
-add_executable(svfmt_test tests/FormatterTest.cpp)
-target_link_libraries(svfmt_test PRIVATE svfmt_lib)
-add_test(NAME svfmt_test COMMAND svfmt_test)
+if(SVFMT_BUILD_TESTS)
+  enable_testing()
+  add_test(NAME format_inputs
+           COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_format_inputs.sh $<TARGET_FILE:svfmt>
+                   ${CMAKE_CURRENT_SOURCE_DIR}/tests/inputs)
+  add_test(NAME verible_diff
+           COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_diff.sh $<TARGET_FILE:svfmt>
+                   ${CMAKE_CURRENT_SOURCE_DIR}/tests/diff)
+endif()
+
+if(SVFMT_BUILD_TESTS)
+  # Differential run on ~2100 inputs extracted from Verible's formatter tests.
+  # Fails if the number of outputs identical to verible-verilog-format drops.
+  find_package(Python3 COMPONENTS Interpreter)
+  if(Python3_FOUND)
+    add_test(NAME verible_cases
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_verible_cases.py
+                     $<TARGET_FILE:svfmt> ${CMAKE_CURRENT_SOURCE_DIR}/tests/verible_cases.jsonl
+                     --min-same 1260)
+  endif()
+endif()

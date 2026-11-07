@@ -1,0 +1,1188 @@
+#include "svfmt/slang-analyzer.h"
+
+#include <algorithm>
+#include <cctype>
+#include <map>
+#include <memory>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+#include "absl/container/flat_hash_map.h"
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
+#include "slang/diagnostics/DiagnosticEngine.h"
+#include "slang/diagnostics/PreprocessorDiags.h"
+#include "slang/parsing/LexerFacts.h"
+#include "slang/parsing/Preprocessor.h"
+#include "slang/parsing/Token.h"
+#include "slang/syntax/AllSyntax.h"
+#include "slang/syntax/SyntaxTree.h"
+#include "slang/text/SourceManager.h"
+#include "slang/util/Bag.h"
+#include "verible/common/text/concrete-syntax-leaf.h"
+#include "verible/common/text/concrete-syntax-tree.h"
+#include "verible/common/text/token-info.h"
+#include "verible/common/text/token-stream-view.h"
+#include "svfmt/group-kinds.h"
+#include "svfmt/list-kinds.h"
+#include "verible/verilog/parser/verilog-token-enum.h"
+
+namespace svfmt {
+
+using slang::parsing::LexerFacts;
+using slang::parsing::Token;
+using slang::parsing::TokenKind;
+using slang::parsing::Trivia;
+using slang::parsing::TriviaKind;
+using slang::syntax::SyntaxNode;
+using verible::SymbolPtr;
+using verible::SyntaxTreeLeaf;
+using verible::SyntaxTreeNode;
+using verible::TokenInfo;
+
+namespace {
+
+const absl::flat_hash_map<std::string_view, int> &AliasMap() {
+  static const auto *map = [] {
+    auto *m = new absl::flat_hash_map<std::string_view, int>;
+    for (const auto &entry : verilog::kVerilogTokenTable) {
+      if (entry.alias != nullptr) m->emplace(entry.alias, entry.value);
+    }
+    return m;
+  }();
+  return *map;
+}
+
+int BaseEnum(std::string_view base_text) {
+  switch (std::tolower(static_cast<unsigned char>(base_text.back()))) {
+    case 'b':
+      return TK_BinBase;
+    case 'o':
+      return TK_OctBase;
+    case 'h':
+      return TK_HexBase;
+    default:
+      return TK_DecBase;
+  }
+}
+
+int DigitsEnumForBase(int base_enum) {
+  switch (base_enum) {
+    case TK_BinBase:
+      return TK_BinDigits;
+    case TK_OctBase:
+      return TK_OctDigits;
+    case TK_HexBase:
+      return TK_HexDigits;
+    default:
+      return TK_DecDigits;
+  }
+}
+
+// Maps a slang token (outside directives) to a verilog_tokentype.
+int MapToken(const Token &tok, int previous_enum) {
+  switch (tok.kind) {
+    case TokenKind::Identifier:
+      return tok.rawText().starts_with('\\') ? EscapedIdentifier
+                                              : SymbolIdentifier;
+    case TokenKind::SystemIdentifier:
+      return SystemTFIdentifier;
+    case TokenKind::StringLiteral:
+      return TK_StringLiteral;
+    case TokenKind::IntegerBase:
+      return BaseEnum(tok.rawText());
+    case TokenKind::IntegerLiteral:
+      if (previous_enum == TK_BinBase || previous_enum == TK_OctBase ||
+          previous_enum == TK_DecBase || previous_enum == TK_HexBase) {
+        return DigitsEnumForBase(previous_enum);
+      }
+      return TK_DecNumber;
+    case TokenKind::UnbasedUnsizedLiteral:
+      return TK_UnBasedNumber;
+    case TokenKind::RealLiteral:
+      return TK_RealTime;
+    case TokenKind::TimeLiteral:
+      return TK_TimeLiteral;
+    case TokenKind::IncludeFileName:
+      return tok.rawText().starts_with('<') ? TK_AngleBracketInclude
+                                             : TK_StringLiteral;
+    case TokenKind::Directive:
+    case TokenKind::MacroUsage: {
+      const auto &aliases = AliasMap();
+      if (auto it = aliases.find(tok.rawText()); it != aliases.end()) {
+        return it->second;
+      }
+      return MacroIdentifier;
+    }
+    case TokenKind::LineContinuation:
+      return TK_LINE_CONT;
+    default:
+      break;
+  }
+  // Digits following a base that slang lexed as something else (e.g. 'hx).
+  if (previous_enum == TK_BinBase || previous_enum == TK_OctBase ||
+      previous_enum == TK_DecBase || previous_enum == TK_HexBase) {
+    if (tok.kind != TokenKind::OpenParenthesis) {
+      return DigitsEnumForBase(previous_enum);
+    }
+  }
+  std::string_view text = LexerFacts::getTokenKindText(tok.kind);
+  if (text.empty()) text = tok.rawText();
+  const auto &aliases = AliasMap();
+  if (auto it = aliases.find(text); it != aliases.end()) return it->second;
+  if (text.size() == 1) return static_cast<unsigned char>(text[0]);
+  return TK_OTHER;
+}
+
+}  // namespace
+
+// A conditional compilation directive (`ifdef NAME, `else, ...) found by a
+// lexical pre-scan of the source.
+struct CondDirective {
+  size_t begin, end;            // whole directive text
+  size_t name_begin, name_end;  // macro name / expression, if any
+  int keyword_enum;
+  SyntaxKind kind;
+};
+
+// Finds conditional directives outside comments, strings and `define bodies.
+std::vector<CondDirective> ScanConditionalDirectives(std::string_view text) {
+  std::vector<CondDirective> out;
+  size_t i = 0;
+  const size_t n = text.size();
+  auto ident_end = [&](size_t p) {
+    while (p < n && (std::isalnum(static_cast<unsigned char>(text[p])) || text[p] == '_' ||
+                     text[p] == '$')) {
+      ++p;
+    }
+    return p;
+  };
+  while (i < n) {
+    const char c = text[i];
+    if (c == '/' && i + 1 < n && text[i + 1] == '/') {
+      while (i < n && text[i] != '\n') ++i;
+    } else if (c == '/' && i + 1 < n && text[i + 1] == '*') {
+      size_t e = text.find("*/", i + 2);
+      i = e == std::string_view::npos ? n : e + 2;
+    } else if (c == '"') {
+      ++i;
+      while (i < n && text[i] != '"' && text[i] != '\n') i += text[i] == '\\' ? 2 : 1;
+      ++i;
+    } else if (c == '`') {
+      const size_t kw_end = ident_end(i + 1);
+      const std::string_view kw = text.substr(i + 1, kw_end - i - 1);
+      if (kw == "define") {
+        // Skip the macro body, including line continuations.
+        size_t p = kw_end;
+        while (p < n && !(text[p] == '\n' && text[p - 1] != '\\')) ++p;
+        i = p;
+        continue;
+      }
+      struct { std::string_view name; int e; SyntaxKind k; bool has_name; } static const kKinds[] = {
+          {"ifdef", PP_ifdef, SyntaxKind::IfDefDirective, true},
+          {"ifndef", PP_ifndef, SyntaxKind::IfNDefDirective, true},
+          {"elsif", PP_elsif, SyntaxKind::ElsIfDirective, true},
+          {"else", PP_else, SyntaxKind::ElseDirective, false},
+          {"endif", PP_endif, SyntaxKind::EndIfDirective, false},
+      };
+      bool matched = false;
+      for (const auto &k : kKinds) {
+        if (kw != k.name) continue;
+        CondDirective d{i, kw_end, kw_end, kw_end, k.e, k.k};
+        if (k.has_name) {
+          size_t p = kw_end;
+          while (p < n && (text[p] == ' ' || text[p] == '\t')) ++p;
+          if (p < n && text[p] == '(') {
+            int depth = 0;
+            size_t q = p;
+            for (; q < n && text[q] != '\n'; ++q) {
+              if (text[q] == '(') ++depth;
+              if (text[q] == ')' && --depth == 0) { ++q; break; }
+            }
+            d.name_begin = p;
+            d.name_end = d.end = q;
+          } else {
+            d.name_begin = p;
+            d.name_end = d.end = ident_end(p);
+          }
+          if (d.name_end == d.name_begin) break;  // malformed; leave to slang
+        }
+        out.push_back(d);
+        matched = true;
+        i = d.end;
+        break;
+      }
+      if (!matched) i = kw_end;
+    } else {
+      ++i;
+    }
+  }
+  return out;
+}
+
+// Walks the slang tree once, building the token stream and the CST together.
+class SlangAnalyzer::Builder {
+ public:
+  // `match_text` is the text slang parsed: identical to `contents` except
+  // that the conditional directives in `directives` were blanked out (see
+  // SlangAnalyzer::AnalyzeWithMode); they are re-inserted here.
+  Builder(SlangAnalyzer &analyzer, std::string_view contents, std::string_view match_text,
+          std::vector<CondDirective> directives, slang::BufferID buffer)
+      : analyzer_(analyzer), contents_(contents), match_text_(match_text),
+        directives_(std::move(directives)), buffer_(buffer), cursor_(contents.data()) {}
+
+  absl::Status Build(const SyntaxNode &root, verible::TokenSequence &tokens,
+                     SymbolPtr &tree) {
+    auto node = std::make_unique<SyntaxTreeNode>(static_cast<int>(root.kind));
+    analyzer_.origins_[node.get()] = &root;
+    parent_first_.push_back(Token());
+    ConvertMembers(root, *node);
+    if (!status_.ok()) return status_;
+    if (cursor_ != contents_.data() + contents_.size()) {
+      return absl::InternalError(absl::StrCat(
+          "svfmt: could not account for source text at byte offset ",
+          Offset(cursor_),
+          " (unsupported preprocessor construct); refusing to format",
+          DebugTail()));
+    }
+    tokens = std::move(tokens_);
+    tokens.push_back(TokenInfo::EOFToken(contents_));
+    tree = std::move(node);
+    return absl::OkStatus();
+  }
+
+ private:
+  int Offset(const char *p) const { return static_cast<int>(p - contents_.data()); }
+
+  // slang tokens do not always point into the source buffer (keywords and
+  // punctuation return static text), so tokens are matched by location.
+  // Returns the token's text in the main buffer if it starts at the cursor,
+  // else an empty view (macro expansion, included file, missing token).
+  std::string_view TokenAtCursor(const Token &tok) const {
+    if (tok.rawText().empty()) return {};
+    auto loc = tok.location();
+    if (loc.buffer() != buffer_ || loc.offset() != static_cast<size_t>(Offset(cursor_))) {
+      return {};
+    }
+    return contents_.substr(loc.offset(), tok.rawText().size());
+  }
+
+  // Trivia text is sometimes a copy (e.g. inside directives), so trivia is
+  // matched by content. Returns the matching view of the main buffer, or an
+  // empty view.
+  std::string_view TriviaAtCursor(std::string_view text) const {
+    const size_t offset = static_cast<size_t>(Offset(cursor_));
+    if (text.empty() || match_text_.size() - offset < text.size()) return {};
+    if (match_text_.substr(offset, text.size()) != text) return {};
+    return contents_.substr(offset, text.size());
+  }
+
+  // Emits whitespace trivia text, re-inserting blanked conditional
+  // directives as CST nodes appended to `parent`.
+  void EmitWhitespaceRange(std::string_view text, SyntaxTreeNode &parent) {
+    const size_t end = static_cast<size_t>(Offset(text.data())) + text.size();
+    while (static_cast<size_t>(Offset(cursor_)) < end) {
+      const size_t pos = static_cast<size_t>(Offset(cursor_));
+      while (next_directive_ < directives_.size() && directives_[next_directive_].begin < pos) {
+        ++next_directive_;
+      }
+      if (next_directive_ < directives_.size() && directives_[next_directive_].begin == pos) {
+        const CondDirective &d = directives_[next_directive_++];
+        auto node = std::make_unique<SyntaxTreeNode>(static_cast<int>(d.kind));
+        size_t kw_end = d.begin + 1;
+        while (kw_end < d.end && std::isalpha(static_cast<unsigned char>(contents_[kw_end]))) {
+          ++kw_end;
+        }
+        node->AppendChild(std::make_unique<SyntaxTreeLeaf>(
+            Emit(d.keyword_enum, contents_.substr(d.begin, kw_end - d.begin))));
+        if (d.name_end > d.name_begin) {
+          if (d.name_begin > kw_end) EmitWhitespace(contents_.substr(kw_end, d.name_begin - kw_end));
+          node->AppendChild(std::make_unique<SyntaxTreeLeaf>(
+              Emit(PP_Identifier, contents_.substr(d.name_begin, d.name_end - d.name_begin))));
+        }
+        parent.AppendChild(std::move(node));
+        continue;
+      }
+      size_t stop = end;
+      if (next_directive_ < directives_.size()) stop = std::min(stop, directives_[next_directive_].begin);
+      EmitWhitespace(contents_.substr(pos, stop - pos));
+    }
+  }
+
+  // Appends a token covering `text`, which must start at the cursor.
+  const TokenInfo &Emit(int token_enum, std::string_view text) {
+    tokens_.emplace_back(token_enum, text);
+    cursor_ = text.data() + text.size();
+    if (token_enum != TK_SPACE && token_enum != TK_NEWLINE &&
+        token_enum != TK_EOL_COMMENT && token_enum != TK_COMMENT_BLOCK) {
+      previous_enum_ = token_enum;
+    }
+    return tokens_.back();
+  }
+
+
+  void EmitWhitespace(std::string_view text) {
+    size_t i = 0;
+    while (i < text.size()) {
+      size_t j = i;
+      if (text[i] == '\n') {
+        j = i + 1;
+        Emit(TK_NEWLINE, text.substr(i, 1));
+      } else if (text[i] == '\r' && i + 1 < text.size() && text[i + 1] == '\n') {
+        // Verible keeps '\r' as part of the preceding space run.
+        j = i + 1;
+        Emit(TK_SPACE, text.substr(i, 1));
+      } else {
+        while (j < text.size() && text[j] != '\n' &&
+               !(text[j] == '\r' && j + 1 < text.size() && text[j + 1] == '\n')) {
+          j++;
+        }
+        Emit(TK_SPACE, text.substr(i, j - i));
+      }
+      i = j;
+    }
+  }
+
+  // Emits leading trivia of a token. Directives are converted into CST nodes
+  // and appended to `parent`.
+  void EmitTrivia(const Token &tok, SyntaxTreeNode &parent) {
+    for (const Trivia &trivia : tok.trivia()) {
+      switch (trivia.kind) {
+        case TriviaKind::Whitespace:
+        case TriviaKind::EndOfLine:
+          if (auto text = TriviaAtCursor(trivia.getRawText()); !text.empty()) {
+            EmitWhitespaceRange(text, parent);
+          }
+          break;
+        case TriviaKind::LineComment:
+          if (auto text = TriviaAtCursor(trivia.getRawText()); !text.empty()) {
+            Emit(TK_EOL_COMMENT, text);
+          }
+          break;
+        case TriviaKind::BlockComment:
+          if (auto text = TriviaAtCursor(trivia.getRawText()); !text.empty()) {
+            Emit(TK_COMMENT_BLOCK, text);
+          }
+          break;
+        case TriviaKind::DisabledText:
+          if (auto text = TriviaAtCursor(trivia.getRawText()); !text.empty()) {
+            EmitVerbatim(text);
+          }
+          break;
+        case TriviaKind::Directive:
+          ConvertDirective(*trivia.syntax(), parent);
+          break;
+        case TriviaKind::SkippedTokens:
+        case TriviaKind::SkippedSyntax:
+          if (status_.ok()) {
+            status_ = absl::InvalidArgumentError("svfmt: source has syntax errors");
+          }
+          break;
+        default:
+          break;
+      }
+    }
+  }
+
+  void EmitVerbatim(std::string_view text) {
+    analyzer_.verbatim_ranges_.emplace_back(Offset(text.data()),
+                                            Offset(text.data()) + text.size());
+    Emit(TK_SVFMT_DISABLED_TEXT, text);
+  }
+
+  // Emits a token that is part of a directive and appends it as a leaf.
+  void EmitDirectiveToken(const Token &tok, int token_enum, SyntaxTreeNode &node) {
+    EmitTrivia(tok, node);
+    std::string_view text = TokenAtCursor(tok);
+    if (text.empty()) return;
+    node.AppendChild(std::make_unique<SyntaxTreeLeaf>(Emit(token_enum, text)));
+  }
+
+  // Emits a run of tokens (macro argument, `define body) as one token.
+  void EmitMerged(std::span<const Token> toks, int token_enum, SyntaxTreeNode &node,
+                  bool verbatim) {
+    if (toks.empty()) return;
+    EmitTrivia(toks.front(), node);
+    // Leading trivia of later tokens is part of the span.
+    if (TokenAtCursor(toks.front()).empty()) return;
+    const auto &last = toks.back();
+    if (last.location().buffer() != buffer_) return;
+    const size_t begin = static_cast<size_t>(Offset(cursor_));
+    const size_t end = last.location().offset() + last.rawText().size();
+    if (end <= begin) return;
+    std::string_view text = contents_.substr(begin, end - begin);
+    if (verbatim) {
+      analyzer_.verbatim_ranges_.emplace_back(Offset(text.data()),
+                                              Offset(text.data()) + text.size());
+    }
+    node.AppendChild(std::make_unique<SyntaxTreeLeaf>(Emit(token_enum, text)));
+  }
+
+  // Tokens of an inactive `ifdef branch become one verbatim token.
+  void EmitDisabled(const slang::syntax::TokenList &toks, SyntaxTreeNode &node) {
+    if (toks.empty()) return;
+    std::vector<Token> list(toks.begin(), toks.end());
+    // Whitespace before the first disabled token stays ordinary whitespace.
+    EmitTrivia(list.front(), node);
+    if (TokenAtCursor(list.front()).empty()) return;
+    const auto &last = list.back();
+    const size_t begin = static_cast<size_t>(Offset(cursor_));
+    const size_t end = last.location().offset() + last.rawText().size();
+    if (last.location().buffer() != buffer_ || end <= begin) return;
+    std::string_view text = contents_.substr(begin, end - begin);
+    // Trailing whitespace stays ordinary whitespace (it is the trivia of the
+    // next directive).
+    while (!text.empty() && (text.back() == '\n' || text.back() == '\r' ||
+                             text.back() == ' ' || text.back() == '\t')) {
+      text.remove_suffix(1);
+    }
+    if (text.empty()) return;
+    analyzer_.verbatim_ranges_.emplace_back(begin, begin + text.size());
+    node.AppendChild(std::make_unique<SyntaxTreeLeaf>(Emit(TK_SVFMT_DISABLED_TEXT, text)));
+  }
+
+  void ConvertDirective(const SyntaxNode &syntax, SyntaxTreeNode &parent) {
+    using namespace slang::syntax;
+    auto node = std::make_unique<SyntaxTreeNode>(static_cast<int>(syntax.kind));
+    analyzer_.origins_[node.get()] = &syntax;
+    switch (syntax.kind) {
+      case SyntaxKind::MacroUsage: {
+        const auto &usage = syntax.as<MacroUsageSyntax>();
+        EmitDirectiveToken(usage.directive, usage.args ? MacroCallId : MacroIdentifier,
+                           *node);
+        if (usage.args) {
+          const auto &args = *usage.args;
+          Group(GroupKind::kParenGroup, *node, [&](SyntaxTreeNode &paren) {
+            EmitDirectiveToken(args.openParen, '(', paren);
+            Group(GroupKind::kMacroArgList, paren, [&](SyntaxTreeNode &list) {
+              for (size_t i = 0; i < args.args.getChildCount(); i++) {
+                auto child = args.args.getChild(i);
+                if (child.isNode()) {
+                  EmitMerged(child.node()->as<MacroActualArgumentSyntax>().tokens,
+                             MacroArg, list, /*verbatim=*/false);
+                } else {
+                  EmitDirectiveToken(child.token(), ',', list);
+                }
+              }
+            });
+            EmitDirectiveToken(args.closeParen, ')', paren);
+          });
+        }
+        break;
+      }
+      case SyntaxKind::DefineDirective: {
+        const auto &define = syntax.as<DefineDirectiveSyntax>();
+        EmitDirectiveToken(define.directive, PP_define, *node);
+        EmitDirectiveToken(define.name, PP_Identifier, *node);
+        if (define.formalArguments) {
+          // Formal arguments, verbatim (Verible keeps them in the macro name
+          // line untouched).
+          ConvertDirectiveTokens(*define.formalArguments, *node);
+        }
+        std::vector<Token> body(define.body.begin(), define.body.end());
+        EmitMerged(body, PP_define_body, *node, /*verbatim=*/true);
+        break;
+      }
+      case SyntaxKind::IfDefDirective:
+      case SyntaxKind::IfNDefDirective:
+      case SyntaxKind::ElsIfDirective: {
+        const auto &branch = syntax.as<ConditionalBranchDirectiveSyntax>();
+        EmitDirectiveToken(branch.directive, MapToken(branch.directive, 0), *node);
+        ConvertDirectiveTokens(*branch.expr, *node, /*name_enum=*/PP_Identifier);
+        EmitDisabled(branch.disabledTokens, *node);
+        break;
+      }
+      case SyntaxKind::ElseDirective:
+      case SyntaxKind::EndIfDirective: {
+        const auto &branch = syntax.as<UnconditionalBranchDirectiveSyntax>();
+        EmitDirectiveToken(branch.directive, MapToken(branch.directive, 0), *node);
+        EmitDisabled(branch.disabledTokens, *node);
+        break;
+      }
+      case SyntaxKind::UndefDirective:
+        ConvertDirectiveTokens(syntax, *node, /*name_enum=*/PP_Identifier);
+        break;
+      default:
+        ConvertDirectiveTokens(syntax, *node);
+        break;
+    }
+    if (!node->empty()) parent.AppendChild(std::move(node));
+  }
+
+  // Generic directive conversion: every token becomes a leaf.
+  void ConvertDirectiveTokens(const SyntaxNode &syntax, SyntaxTreeNode &node,
+                              int name_enum = 0) {
+    for (size_t i = 0; i < syntax.getChildCount(); i++) {
+      if (auto *child = syntax.childNode(i)) {
+        ConvertDirectiveTokens(*child, node, name_enum);
+        continue;
+      }
+      Token tok = syntax.childToken(i);
+      if (!tok) continue;
+      int token_enum = MapToken(tok, previous_enum_);
+      if (name_enum != 0 && tok.kind == TokenKind::Identifier) token_enum = name_enum;
+      if (tok.kind == TokenKind::Directive) {
+        if (auto it = AliasMap().find(tok.rawText()); it != AliasMap().end()) {
+          token_enum = it->second;
+        }
+      }
+      EmitDirectiveToken(tok, token_enum, node);
+    }
+  }
+
+  // Runs `fill` to populate a synthetic group node appended to `out`.
+  template <typename Fill>
+  void Group(GroupKind kind, SyntaxTreeNode &out, Fill fill) {
+    auto group = std::make_unique<SyntaxTreeNode>(static_cast<int>(kind));
+    parent_first_.push_back(Token());
+    fill(*group);
+    parent_first_.pop_back();
+    if (!group->empty()) out.AppendChild(std::move(group));
+  }
+
+  // Hand-written conversions that insert Verible-like grouping nodes.
+  bool ConvertSpecial(const SyntaxNode &node, SyntaxTreeNode &out) {
+    using namespace slang::syntax;
+    switch (node.kind) {
+      case SyntaxKind::ConditionalStatement: {
+        const auto &n = node.as<ConditionalStatementSyntax>();
+        Child(n.label, out);
+        List(n.attributes, static_cast<int>(ListKind::ConditionalStatement_attributes), out);
+        Group(GroupKind::kIfClause, out, [&](SyntaxTreeNode &clause) {
+          Group(GroupKind::kIfHeader, clause, [&](SyntaxTreeNode &g) {
+            Tok(n.uniqueOrPriority, g);
+            Tok(n.ifKeyword, g);
+            Tok(n.openParen, g);
+            Child(n.predicate.get(), g);
+            Tok(n.closeParen, g);
+          });
+          Group(GroupKind::kIfBody, clause,
+                [&](SyntaxTreeNode &g) { Child(n.statement.get(), g); });
+        });
+        Child(n.elseClause, out);
+        return true;
+      }
+      case SyntaxKind::IfGenerate: {
+        const auto &n = node.as<IfGenerateSyntax>();
+        List(n.attributes, static_cast<int>(ListKind::IfGenerate_attributes), out);
+        Group(GroupKind::kIfClause, out, [&](SyntaxTreeNode &clause) {
+          Group(GroupKind::kIfHeader, clause, [&](SyntaxTreeNode &g) {
+            Tok(n.keyword, g);
+            Tok(n.openParen, g);
+            Child(n.condition.get(), g);
+            Tok(n.closeParen, g);
+          });
+          Group(GroupKind::kIfBody, clause,
+                [&](SyntaxTreeNode &g) { Child(n.block.get(), g); });
+        });
+        Child(n.elseClause, out);
+        return true;
+      }
+      case SyntaxKind::ElseClause: {
+        const auto &n = node.as<ElseClauseSyntax>();
+        Tok(n.elseKeyword, out);
+        Group(GroupKind::kElseBody, out,
+              [&](SyntaxTreeNode &g) { Child(n.clause.get(), g); });
+        return true;
+      }
+      case SyntaxKind::SequentialBlockStatement:
+      case SyntaxKind::ParallelBlockStatement: {
+        const auto &n = node.as<BlockStatementSyntax>();
+        List(n.attributes, static_cast<int>(ListKind::BlockStatement_attributes), out);
+        Group(GroupKind::kBegin, out, [&](SyntaxTreeNode &g) {
+          Child(n.label, g);
+          Tok(n.begin, g);
+          Child(n.blockName, g);
+        });
+        List(n.items, static_cast<int>(ListKind::BlockStatement_items), out);
+        Group(GroupKind::kEnd, out, [&](SyntaxTreeNode &g) {
+          Tok(n.end, g);
+          Child(n.endBlockName, g);
+        });
+        return true;
+      }
+      case SyntaxKind::GenerateBlock: {
+        const auto &n = node.as<GenerateBlockSyntax>();
+        List(n.attributes, static_cast<int>(ListKind::GenerateBlock_attributes), out);
+        Group(GroupKind::kBegin, out, [&](SyntaxTreeNode &g) {
+          Child(n.label, g);
+          Tok(n.begin, g);
+          Child(n.beginName, g);
+        });
+        List(n.members, static_cast<int>(ListKind::GenerateBlock_members), out);
+        Group(GroupKind::kEnd, out, [&](SyntaxTreeNode &g) {
+          Tok(n.end, g);
+          Child(n.endName, g);
+        });
+        return true;
+      }
+      case SyntaxKind::ForLoopStatement: {
+        const auto &n = node.as<ForLoopStatementSyntax>();
+        Child(n.label, out);
+        List(n.attributes, static_cast<int>(ListKind::ForLoopStatement_attributes), out);
+        Group(GroupKind::kLoopHeader, out, [&](SyntaxTreeNode &g) {
+          Tok(n.forKeyword, g);
+          Tok(n.openParen, g);
+          List(n.initializers, static_cast<int>(ListKind::ForLoopStatement_initializers), g);
+          Tok(n.semi1, g);
+          Child(n.stopExpr, g);
+          Tok(n.semi2, g);
+          List(n.steps, static_cast<int>(ListKind::ForLoopStatement_steps), g);
+          Tok(n.closeParen, g);
+        });
+        Child(n.statement.get(), out);
+        return true;
+      }
+      case SyntaxKind::ForeachLoopStatement: {
+        const auto &n = node.as<ForeachLoopStatementSyntax>();
+        Child(n.label, out);
+        List(n.attributes, static_cast<int>(ListKind::ForeachLoopStatement_attributes), out);
+        Group(GroupKind::kLoopHeader, out, [&](SyntaxTreeNode &g) {
+          Tok(n.keyword, g);
+          Child(n.loopList.get(), g);
+        });
+        Child(n.statement.get(), out);
+        return true;
+      }
+      case SyntaxKind::LoopStatement: {
+        const auto &n = node.as<LoopStatementSyntax>();
+        Child(n.label, out);
+        List(n.attributes, static_cast<int>(ListKind::LoopStatement_attributes), out);
+        Group(GroupKind::kLoopHeader, out, [&](SyntaxTreeNode &g) {
+          Tok(n.repeatOrWhile, g);
+          Tok(n.openParen, g);
+          Child(n.expr.get(), g);
+          Tok(n.closeParen, g);
+        });
+        Child(n.statement.get(), out);
+        return true;
+      }
+      case SyntaxKind::LoopGenerate: {
+        const auto &n = node.as<LoopGenerateSyntax>();
+        List(n.attributes, static_cast<int>(ListKind::LoopGenerate_attributes), out);
+        Group(GroupKind::kLoopHeader, out, [&](SyntaxTreeNode &g) {
+          Tok(n.keyword, g);
+          Tok(n.openParen, g);
+          Tok(n.genvar, g);
+          Tok(n.identifier, g);
+          Tok(n.equals, g);
+          Child(n.initialExpr.get(), g);
+          Tok(n.semi1, g);
+          Child(n.stopExpr.get(), g);
+          Tok(n.semi2, g);
+          Child(n.iterationExpr.get(), g);
+          Tok(n.closeParen, g);
+        });
+        Child(n.block.get(), out);
+        return true;
+      }
+      case SyntaxKind::ClassMethodDeclaration: {
+        // Qualifiers ("virtual", "static", ...) belong to the method header.
+        const auto &n = node.as<ClassMethodDeclarationSyntax>();
+        List(n.attributes, static_cast<int>(ListKind::ClassMethodDeclaration_attributes), out);
+        pending_qualifiers_ = &n.qualifiers;
+        Child(n.declaration.get(), out);
+        pending_qualifiers_ = nullptr;
+        return true;
+      }
+      case SyntaxKind::WildcardPortConnection: {
+        // slang has separate '.' and '*' tokens; Verible lexes ".*".
+        const auto &n = node.as<WildcardPortConnectionSyntax>();
+        List(n.attributes, static_cast<int>(ListKind::WildcardPortConnection_attributes), out);
+        EmitTrivia(n.dot, out);
+        std::string_view dot = TokenAtCursor(n.dot);
+        if (!dot.empty() && n.star.trivia().empty() && n.star.location().buffer() == buffer_ &&
+            n.star.location().offset() == n.dot.location().offset() + 1) {
+          out.AppendChild(std::make_unique<SyntaxTreeLeaf>(
+              Emit(TK_DOTSTAR, contents_.substr(n.dot.location().offset(), 2))));
+        } else {
+          Tok(n.dot, out);
+          Tok(n.star, out);
+        }
+        return true;
+      }
+      case SyntaxKind::FunctionDeclaration:
+      case SyntaxKind::TaskDeclaration: {
+        const auto &n = node.as<FunctionDeclarationSyntax>();
+        const slang::syntax::TokenList *qualifiers = pending_qualifiers_;
+        pending_qualifiers_ = nullptr;
+        List(n.attributes, static_cast<int>(ListKind::FunctionDeclaration_attributes), out);
+        Group(GroupKind::kSubroutineHeader, out, [&](SyntaxTreeNode &g) {
+          if (qualifiers) Toks(*qualifiers, g);
+          Child(n.prototype.get(), g);
+          Tok(n.semi, g);
+        });
+        List(n.items, static_cast<int>(ListKind::FunctionDeclaration_items), out);
+        Tok(n.end, out);
+        Child(n.endBlockName, out);
+        return true;
+      }
+      case SyntaxKind::ClassDeclaration: {
+        const auto &n = node.as<ClassDeclarationSyntax>();
+        List(n.attributes, static_cast<int>(ListKind::ClassDeclaration_attributes), out);
+        Group(GroupKind::kClassHeader, out, [&](SyntaxTreeNode &g) {
+          Tok(n.virtualOrInterface, g);
+          Tok(n.classKeyword, g);
+          Child(n.finalSpecifier, g);
+          Tok(n.name, g);
+          Child(n.parameters, g);
+          Child(n.extendsClause, g);
+          Child(n.implementsClause, g);
+          Tok(n.semi, g);
+        });
+        List(n.items, static_cast<int>(ListKind::ClassDeclaration_items), out);
+        Tok(n.endClass, out);
+        Child(n.endBlockName, out);
+        return true;
+      }
+      case SyntaxKind::HierarchyInstantiation: {
+        const auto &n = node.as<HierarchyInstantiationSyntax>();
+        List(n.attributes, static_cast<int>(ListKind::HierarchyInstantiation_attributes), out);
+        Group(GroupKind::kInstantiationType, out, [&](SyntaxTreeNode &g) {
+          Tok(n.type, g);
+          Child(n.parameters, g);
+        });
+        List(n.instances, static_cast<int>(ListKind::HierarchyInstantiation_instances), out);
+        Tok(n.semi, out);
+        return true;
+      }
+      case SyntaxKind::DataDeclaration: {
+        const auto &n = node.as<DataDeclarationSyntax>();
+        List(n.attributes, static_cast<int>(ListKind::DataDeclaration_attributes), out);
+        Toks(n.modifiers, out);
+        Group(GroupKind::kInstantiationType, out,
+              [&](SyntaxTreeNode &g) { Child(n.type.get(), g); });
+        List(n.declarators, static_cast<int>(ListKind::DataDeclaration_declarators), out);
+        Tok(n.semi, out);
+        return true;
+      }
+      default:
+        return false;
+    }
+  }
+
+  // Converts the members of `syntax` into `node` (generated per syntax class,
+  // see tools/gen_slang_cst.py). The callbacks below are used by the
+  // generated code.
+  void ConvertMembers(const SyntaxNode &node, SyntaxTreeNode &out) {
+    using namespace slang::syntax;
+    auto &b = *this;
+    if (ConvertSpecial(node, out)) return;
+#include "svfmt/slang-cst-gen.inc"
+    // Kinds without a generated case: generic child iteration.
+    for (size_t i = 0; i < node.getChildCount(); i++) {
+      if (const SyntaxNode *child = node.childNode(i)) {
+        Child(child, out);
+      } else {
+        Tok(node.childToken(i), out);
+      }
+    }
+  }
+
+ public:
+  void Tok(const Token &tok, SyntaxTreeNode &out) {
+    if (!tok) return;
+    EmitTrivia(tok, out);
+    std::string_view text = TokenAtCursor(tok);
+    if (text.empty()) return;  // macro expansion, include, missing
+    int token_enum = MapToken(tok, previous_enum_);
+    out.AppendChild(std::make_unique<SyntaxTreeLeaf>(Emit(token_enum, text)));
+  }
+
+  void Toks(const slang::syntax::TokenList &toks, SyntaxTreeNode &out) {
+    for (const Token &tok : toks) Tok(tok, out);
+  }
+
+  void Child(const SyntaxNode *child, SyntaxTreeNode &out) {
+    if (child == nullptr) return;
+    // Hoist directives in front of a child up to the outermost node that
+    // starts with the same token, so that e.g. `ifdef lands between module
+    // items rather than inside the first item. List nodes never share a first
+    // token with their elements here, so directives stay inside lists.
+    Token first = child->getFirstToken();
+    if (first && !SameToken(first, parent_first_.back())) EmitTrivia(first, out);
+    auto converted = std::make_unique<SyntaxTreeNode>(static_cast<int>(child->kind));
+    analyzer_.origins_[converted.get()] = child;
+    parent_first_.push_back(first);
+    ConvertMembers(*child, *converted);
+    parent_first_.pop_back();
+    if (!converted->empty()) out.AppendChild(std::move(converted));
+  }
+
+  template <typename ListT>
+  void List(const ListT &list, int list_tag, SyntaxTreeNode &out) {
+    // Empty lists are kept (Verible keeps empty item lists too): comments in
+    // an empty body are indented relative to the list.
+    if (list.empty()) {
+      if (!ListKindName(list_tag).ends_with("_attributes")) {
+        out.AppendChild(std::make_unique<SyntaxTreeNode>(list_tag));
+      }
+      return;
+    }
+    auto converted = std::make_unique<SyntaxTreeNode>(list_tag);
+    parent_first_.push_back(Token());
+    for (size_t i = 0; i < list.getChildCount(); i++) {
+      auto child = list.getChild(i);
+      if (child.isNode()) {
+        Child(child.node(), *converted);
+      } else {
+        Tok(child.token(), *converted);
+      }
+    }
+    parent_first_.pop_back();
+    if (!converted->empty()) out.AppendChild(std::move(converted));
+  }
+
+ private:
+  std::string DebugTail() const {
+    std::string out = "\n  last tokens:";
+    size_t start = tokens_.size() > 6 ? tokens_.size() - 6 : 0;
+    for (size_t i = start; i < tokens_.size(); i++) {
+      absl::StrAppend(&out, " ", TokenEnumName(tokens_[i].token_enum()), "'",
+                      tokens_[i].text(), "'");
+    }
+    return out;
+  }
+
+  static bool SameToken(const Token &a, const Token &b) {
+    return a.kind == b.kind && a.location() == b.location() &&
+           a.rawText().data() == b.rawText().data();
+  }
+
+  SlangAnalyzer &analyzer_;
+  std::string_view contents_;
+  std::string_view match_text_;
+  std::vector<CondDirective> directives_;
+  size_t next_directive_ = 0;
+  slang::BufferID buffer_;
+  const char *cursor_;
+  int previous_enum_ = 0;
+  verible::TokenSequence tokens_;
+  absl::Status status_;
+  // Qualifiers of a ClassMethodDeclaration, moved into its subroutine header.
+  const slang::syntax::TokenList *pending_qualifiers_ = nullptr;
+  // First token of each node being converted (null Token for roots/lists).
+  std::vector<Token> parent_first_;
+};
+
+SlangAnalyzer::~SlangAnalyzer() = default;
+
+// Verible's excerpt parse modes ("// verilog_syntax: parse-as-module-body"):
+// the text is wrapped in a prolog/epilog and the CST is re-rooted at the list
+// that holds the excerpt.
+struct ParseMode {
+  std::string_view name;
+  std::string_view prolog;
+  std::string_view epilog;
+  ListKind body;
+};
+
+namespace {
+
+constexpr ParseMode kParseModes[] = {
+    {"parse-as-module-body", "module __svfmt_excerpt__;", "\nendmodule\n",
+     ListKind::ModuleDeclaration_members},
+    {"parse-as-class-body", "class __svfmt_excerpt__;", "\nendclass\n",
+     ListKind::ClassDeclaration_items},
+    {"parse-as-package-body", "package __svfmt_excerpt__;", "\nendpackage\n",
+     ListKind::ModuleDeclaration_members},
+    {"parse-as-statements", "function void __svfmt_excerpt__();", "\nendfunction\n",
+     ListKind::FunctionDeclaration_items},
+};
+
+const ParseMode *FindParseMode(std::string_view name) {
+  for (const auto &mode : kParseModes) {
+    if (mode.name == name) return &mode;
+  }
+  return nullptr;
+}
+
+// Returns the mode named by a "verilog_syntax: <mode>" directive in the
+// comments that precede the first code token, as Verible does.
+std::string_view ScanParseModeDirective(std::string_view text) {
+  size_t i = 0;
+  while (i < text.size()) {
+    if (std::isspace(static_cast<unsigned char>(text[i]))) {
+      ++i;
+      continue;
+    }
+    std::string_view comment;
+    if (text.substr(i).starts_with("//")) {
+      size_t end = text.find('\n', i);
+      if (end == std::string_view::npos) end = text.size();
+      comment = text.substr(i, end - i);
+      i = end;
+    } else if (text.substr(i).starts_with("/*")) {
+      size_t end = text.find("*/", i);
+      end = end == std::string_view::npos ? text.size() : end + 2;
+      comment = text.substr(i, end - i);
+      i = end;
+    } else {
+      break;
+    }
+    size_t pos = comment.find("verilog_syntax:");
+    if (pos == std::string_view::npos) continue;
+    std::string_view rest = comment.substr(pos + 15);
+    while (!rest.empty() && rest.front() == ' ') rest.remove_prefix(1);
+    size_t len = 0;
+    while (len < rest.size() && (std::isalnum(static_cast<unsigned char>(rest[len])) ||
+                                 rest[len] == '-')) {
+      ++len;
+    }
+    return rest.substr(0, len);
+  }
+  return {};
+}
+
+// Finds the first node (pre-order) with the given tag.
+SymbolPtr *FindNodeWithTag(SymbolPtr &root, int tag) {
+  if (!root || root->Kind() != verible::SymbolKind::kNode) return nullptr;
+  if (root->Tag().tag == tag) return &root;
+  auto &node = verible::SymbolCastToNode(*root);
+  for (auto &child : node.mutable_children()) {
+    if (auto *found = FindNodeWithTag(child, tag)) return found;
+  }
+  return nullptr;
+}
+
+bool IsIdentChar(char c) {
+  return std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '$';
+}
+
+// Builds stub definitions for macros that slang could not find (typically
+// defined in an `include that is not available). A macro used with
+// arguments in statement/item position expands to nothing; one used in an
+// expression position, or without arguments (constants, types), expands to
+// a placeholder identifier. Expansions never reach the output: only the
+// macro call text is formatted.
+std::vector<std::string> StubDefinitions(std::string_view text,
+                                         const std::vector<size_t> &usage_offsets) {
+  struct Info {
+    int arity = -1;  // -1: used without parentheses
+    bool expression = false;
+  };
+  std::map<std::string, Info> infos;
+  for (size_t offset : usage_offsets) {
+    if (offset >= text.size() || text[offset] != '`') continue;
+    size_t end = offset + 1;
+    while (end < text.size() && IsIdentChar(text[end])) ++end;
+    std::string name(text.substr(offset + 1, end - offset - 1));
+    if (name.empty()) continue;
+    Info &info = infos[name];
+    // Arity: count top-level commas inside the argument list.
+    if (end < text.size() && text[end] == '(') {
+      int depth = 0, commas = 0;
+      bool in_string = false;
+      for (size_t i = end; i < text.size(); ++i) {
+        const char c = text[i];
+        if (in_string) {
+          if (c == '\\') ++i;
+          else if (c == '"') in_string = false;
+          continue;
+        }
+        if (c == '"') in_string = true;
+        else if (c == '(' || c == '[' || c == '{') ++depth;
+        else if (c == ')' || c == ']' || c == '}') {
+          if (--depth == 0) break;
+        } else if (c == ',' && depth == 1) {
+          ++commas;
+        }
+      }
+      info.arity = std::max(info.arity, commas + 1);
+    }
+    // Context: the previous non-space character.
+    size_t p = offset;
+    while (p > 0 && std::isspace(static_cast<unsigned char>(text[p - 1]))) --p;
+    if (p > 0) {
+      const char c = text[p - 1];
+      static constexpr std::string_view kExprChars = "=(,[{?+-*/%&|^~!<>#'";
+      if (kExprChars.find(c) != std::string_view::npos) info.expression = true;
+      if (p >= 6 && text.substr(p - 6, 6) == "return") info.expression = true;
+    }
+  }
+  std::vector<std::string> defs;
+  for (const auto &[name, info] : infos) {
+    std::string def = name;
+    if (info.arity >= 0) {
+      def += '(';
+      for (int i = 0; i < info.arity; ++i) {
+        if (i) def += ',';
+        def += "a" + std::to_string(i);
+      }
+      def += ')';
+    }
+    def += '=';
+    if (info.arity < 0 || info.expression) def += "__svfmt_macro__";
+    defs.push_back(std::move(def));
+  }
+  return defs;
+}
+
+}  // namespace
+
+absl::StatusOr<std::unique_ptr<SlangAnalyzer>> SlangAnalyzer::Analyze(
+    std::string_view text, std::string_view filename, const AnalyzerOptions &options) {
+  const ParseMode *mode = FindParseMode(ScanParseModeDirective(text));
+  // Prefer parsing every `ifdef branch (like Verible); fall back to normal
+  // preprocessing, which leaves inactive branches verbatim.
+  const bool has_conditionals = !ScanConditionalDirectives(text).empty();
+  auto attempt = [&](const ParseMode *m) {
+    auto r = AnalyzeWithMode(text, filename, options, m, /*all_branches=*/true);
+    if (!r.ok() && has_conditionals) {
+      r = AnalyzeWithMode(text, filename, options, m, /*all_branches=*/false);
+    }
+    return r;
+  };
+  auto result = attempt(mode);
+  if (!result.ok() && mode == nullptr && absl::IsInvalidArgument(result.status())) {
+    // Like Verible's automatic mode: retry module items (e.g. a bare
+    // "assign" or "always") as a module body.
+    auto retry = attempt(&kParseModes[0]);
+    if (retry.ok()) return retry;
+  }
+  return result;
+}
+
+absl::StatusOr<std::unique_ptr<SlangAnalyzer>> SlangAnalyzer::AnalyzeWithMode(
+    std::string_view text, std::string_view filename, const AnalyzerOptions &options,
+    const ParseMode *mode, bool all_branches) {
+  std::unique_ptr<SlangAnalyzer> analyzer(new SlangAnalyzer);
+  analyzer->source_manager_ = std::make_unique<slang::SourceManager>();
+  auto &sm = *analyzer->source_manager_;
+
+  slang::parsing::PreprocessorOptions pp_options;
+  pp_options.predefines = options.defines;
+  for (const auto &dir : options.include_dirs) {
+    pp_options.additionalIncludePaths.emplace_back(dir);
+  }
+  slang::Bag bag;
+  bag.set(pp_options);
+
+  // In all-branches mode, conditional directives are replaced by spaces (same
+  // length, so offsets are unchanged) and every branch is parsed; the
+  // Builder re-inserts the directives from the original text.
+  std::vector<CondDirective> directives;
+  analyzer->original_text_ = std::string(text);
+  std::string parse_text(text);
+  if (all_branches) {
+    directives = ScanConditionalDirectives(text);
+    for (const auto &d : directives) {
+      std::fill(parse_text.begin() + d.begin, parse_text.begin() + d.end, ' ');
+    }
+  }
+  slang::SourceBuffer buffer = sm.assignText(filename, parse_text);
+  if (mode != nullptr) {
+    // Wrap the excerpt in separate buffers; only main-buffer tokens become
+    // part of the token stream, so offsets are unaffected.
+    std::vector<slang::SourceBuffer> buffers;
+    buffers.push_back(sm.assignText("<svfmt-prolog>", mode->prolog));
+    buffers.push_back(buffer);
+    buffers.push_back(sm.assignText("<svfmt-epilog>", mode->epilog));
+    analyzer->tree_ = slang::syntax::SyntaxTree::fromBuffers(buffers, sm, bag);
+  } else {
+    analyzer->tree_ = slang::syntax::SyntaxTree::fromBuffer(buffer, sm, bag);
+  }
+  const auto &diagnostics = analyzer->tree_->diagnostics();
+  if (!diagnostics.empty()) {
+    analyzer->diagnostics_ = slang::DiagnosticEngine::reportAll(sm, diagnostics);
+  }
+  bool has_errors = false;
+  for (const auto &diag : diagnostics) {
+    if (diag.isError()) has_errors = true;
+  }
+  if (has_errors) {
+    // Unknown macros alone are fine: slang skips their arguments and expands
+    // them to nothing. If they broke the parse, retry once with stubs.
+    std::vector<size_t> unknown_macros;
+    bool other_errors = false;
+    for (const auto &diag : diagnostics) {
+      if (!diag.isError()) continue;
+      if (diag.code == slang::diag::UnknownDirective &&
+          diag.location.buffer() == buffer.id) {
+        unknown_macros.push_back(diag.location.offset());
+      } else {
+        other_errors = true;
+      }
+    }
+    if (unknown_macros.empty() || (other_errors && !options.stubbed_macros.empty())) {
+      return absl::InvalidArgumentError(analyzer->diagnostics_);
+    }
+    if (other_errors) {
+      AnalyzerOptions stubbed = options;
+      stubbed.stubbed_macros = StubDefinitions(text, unknown_macros);
+      stubbed.defines.insert(stubbed.defines.end(), stubbed.stubbed_macros.begin(),
+                             stubbed.stubbed_macros.end());
+      return AnalyzeWithMode(text, filename, stubbed, mode, all_branches);
+    }
+  }
+
+  std::string_view match_text = sm.getSourceText(buffer.id);
+  // slang null-terminates its buffers.
+  if (!match_text.empty() && match_text.back() == '\0') match_text.remove_suffix(1);
+  std::string_view contents = analyzer->original_text_;
+  analyzer->data_ = std::make_unique<verible::TextStructureView>(contents);
+
+  Builder builder(*analyzer, contents, match_text, std::move(directives), buffer.id);
+  auto status = builder.Build(analyzer->tree_->root(),
+                              analyzer->data_->MutableTokenStream(),
+                              analyzer->data_->MutableSyntaxTree());
+  if (!status.ok()) return status;
+
+  if (mode != nullptr) {
+    // Re-root at the excerpt's list (Verible's FocusOnSubtreeSpanningSubstring).
+    auto &tree = analyzer->data_->MutableSyntaxTree();
+    if (SymbolPtr *body = FindNodeWithTag(tree, static_cast<int>(mode->body))) {
+      SymbolPtr new_root = std::move(*body);
+      tree = std::move(new_root);
+    } else {
+      tree = std::make_unique<SyntaxTreeNode>(static_cast<int>(mode->body));
+    }
+  }
+
+  // The filtered view holds what a parser would see: no whitespace/comments.
+  auto &view = analyzer->data_->MutableTokenStreamView();
+  verible::InitTokenStreamView(analyzer->data_->TokenStream(), &view);
+  analyzer->data_->FilterTokens([](const TokenInfo &t) {
+    const int e = t.token_enum();
+    return e != TK_SPACE && e != TK_NEWLINE && e != TK_EOL_COMMENT &&
+           e != TK_COMMENT_BLOCK && e != TK_LINE_CONT;
+  });
+  return analyzer;
+}
+
+const SyntaxNode *SlangAnalyzer::Origin(const verible::Symbol *node) const {
+  auto it = origins_.find(node);
+  return it == origins_.end() ? nullptr : it->second;
+}
+
+AnalyzerOptions &GlobalAnalyzerOptions() {
+  static AnalyzerOptions options;
+  return options;
+}
+
+std::string_view TokenEnumName(int token_enum) {
+  static const auto *names = [] {
+    auto *m = new absl::flat_hash_map<int, std::string_view>;
+    for (const auto &entry : verilog::kVerilogTokenTable) m->emplace(entry.value, entry.name);
+    return m;
+  }();
+  if (token_enum == TK_SVFMT_DISABLED_TEXT) return "TK_SVFMT_DISABLED_TEXT";
+  if (auto it = names->find(token_enum); it != names->end()) return it->second;
+  static const auto *chars = [] {
+    auto *v = new std::vector<std::string>;
+    for (int c = 0; c < 256; c++) v->push_back(std::string("'") + char(c) + "'");
+    return v;
+  }();
+  if (token_enum >= 0 && token_enum < 256) return (*chars)[token_enum];
+  return {};
+}
+
+std::string_view NodeTagName(int tag) {
+  if (IsListTag(tag)) return ListKindName(tag);
+  if (IsGroupTag(tag)) return GroupKindName(tag);
+  return slang::syntax::toString(static_cast<SyntaxKind>(tag));
+}
+
+}  // namespace svfmt
