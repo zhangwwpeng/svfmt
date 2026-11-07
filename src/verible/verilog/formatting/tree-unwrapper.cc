@@ -884,8 +884,7 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
   if (svfmt::IsListTag(tag)) {
     if (IsEmptyListWithoutComments(node) &&
         tag != Tag(ListKind::CompilationUnit_members)) {
-      TraverseChildren(node);
-      return;
+      return;  // absent in Verible's CST; nothing to visit
     }
     switch (static_cast<ListKind>(tag)) {
       case ListKind::CompilationUnit_members:
