@@ -50,7 +50,13 @@ have_verible = not args.no_parity and (
     or os.path.exists(args.verible))
 
 files = []
-for root, _, names in os.walk(args.corpus, followlinks=True):
+seen_dirs = set()  # symlinked directories may point back up the tree
+for root, dirs, names in os.walk(args.corpus, followlinks=True):
+    real = os.path.realpath(root)
+    if real in seen_dirs:
+        dirs[:] = []
+        continue
+    seen_dirs.add(real)
     for n in names:
         if n.endswith(('.sv', '.svh', '.v', '.vh')):
             files.append(os.path.join(root, n))

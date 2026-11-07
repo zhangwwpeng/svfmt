@@ -62,4 +62,6 @@ build/svfmt --dump_cst x.sv; build/svfmt --show_token_partition_tree x.sv
    (rejected by output verification); very long parameter lists hit the
    line-wrap search limit; macro arguments that build escaped identifiers
    via `` are rejected by re-parse (Verible formats them and changes the
-   expansion).
+   expansion). From 03-verilog-designs: leading-comma named port
+   connections with EOL comments under `named_port_alignment=infer` flip
+   from align to preserve on the second pass (Verible: same).
