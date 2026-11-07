@@ -5,6 +5,7 @@
 #include <cstring>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -280,8 +281,35 @@ class SlangAnalyzer::Builder {
   std::string_view TriviaAtCursor(std::string_view text) const {
     const size_t offset = static_cast<size_t>(Offset(cursor_));
     if (text.empty() || match_text_.size() - offset < text.size()) return {};
+    // Trivia that points into a source buffer can be placed exactly: text of
+    // the main buffer must start at the cursor, text of another file (e.g.
+    // the trailing trivia of an included file) is never ours.
+    if (text.data() >= match_text_.data() &&
+        text.data() < match_text_.data() + match_text_.size()) {
+      if (static_cast<size_t>(text.data() - match_text_.data()) != offset) return {};
+    } else if (InForeignBuffer(text.data())) {
+      return {};
+    }
     if (match_text_.substr(offset, text.size()) != text) return {};
     return contents_.substr(offset, text.size());
+  }
+
+  bool InForeignBuffer(const char *p) const {
+    if (foreign_.empty()) {
+      const auto &sm = *analyzer_.source_manager_;
+      for (slang::BufferID id : sm.getAllBuffers()) {
+        if (id == buffer_) continue;
+        std::string_view t = sm.getSourceText(id);
+        foreign_.emplace_back(t.data(), t.data() + t.size());
+      }
+      std::sort(foreign_.begin(), foreign_.end());
+      if (foreign_.empty()) foreign_.emplace_back(nullptr, nullptr);
+    }
+    auto it = std::upper_bound(foreign_.begin(), foreign_.end(), p,
+                               [](const char *q, const auto &range) { return q < range.first; });
+    if (it == foreign_.begin()) return false;
+    --it;
+    return p >= it->first && p < it->second;
   }
 
   // Emits whitespace trivia text, re-inserting blanked conditional
@@ -447,6 +475,19 @@ class SlangAnalyzer::Builder {
   void EmitDisabled(const slang::syntax::TokenList &toks, SyntaxTreeNode &node) {
     if (toks.empty()) return;
     std::vector<Token> list(toks.begin(), toks.end());
+    // The list may end with a zero-width token whose trivia (line ends,
+    // comments) follows the last real token; that trivia is emitted as usual.
+    std::optional<Token> trailing;
+    if (list.back().rawText().empty()) {
+      trailing = list.back();
+      list.pop_back();
+    }
+    EmitDisabledTokens(list, node);
+    if (trailing) EmitTrivia(*trailing, node);
+  }
+
+  void EmitDisabledTokens(const std::vector<Token> &list, SyntaxTreeNode &node) {
+    if (list.empty()) return;
     // Whitespace before the first disabled token stays ordinary whitespace.
     EmitTrivia(list.front(), node);
     if (TokenAtCursor(list.front()).empty()) return;
@@ -455,13 +496,6 @@ class SlangAnalyzer::Builder {
     const size_t end = last.location().offset() + base_offset_ + last.rawText().size();
     if (last.location().buffer() != buffer_ || end <= begin) return;
     std::string_view text = contents_.substr(begin, end - begin);
-    // Trailing whitespace stays ordinary whitespace (it is the trivia of the
-    // next directive).
-    while (!text.empty() && (text.back() == '\n' || text.back() == '\r' ||
-                             text.back() == ' ' || text.back() == '\t')) {
-      text.remove_suffix(1);
-    }
-    if (text.empty()) return;
     analyzer_.verbatim_ranges_.emplace_back(begin, begin + text.size());
     node.AppendChild(std::make_unique<SyntaxTreeLeaf>(Emit(TK_SVFMT_DISABLED_TEXT, text)));
   }
@@ -1166,6 +1200,8 @@ class SlangAnalyzer::Builder {
   // Added to token offsets when converting a sub-parse (macro arguments).
   size_t base_offset_ = 0;
   const char *cursor_;
+  // Text ranges of the other source buffers (lazily built).
+  mutable std::vector<std::pair<const char *, const char *>> foreign_;
   int previous_enum_ = 0;
   verible::TokenSequence tokens_;
   absl::Status status_;
