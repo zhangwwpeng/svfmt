@@ -40,21 +40,21 @@ mkdir -p reports /tmp/svfmt-corpus
 
 ## 4. 运行测试
 
-语料在 `../sv_test`，共 9 个类别、约 2.6 万个文件。逐类运行，每类耗时从几十秒
-到几分钟不等：
+语料在 `../sv_test`，共 9 个类别、约 2.6 万个文件。**每次只测一个目录**：
+由委派方在 prompt 里指定目录 `<DIR>`，例如 `02-sv-designs`，或某个大类下的单个仓库
+`02-sv-designs/opentitan`。不要自行扩大到其他目录：修复后会重新测试，一次全量运行
+只会产生重复结果。
 
 ```sh
-T=/tmp/svfmt-corpus
-for c in 01-sv-compliance 02-sv-designs 03-verilog-designs 04-verification-uvm \
-         05-eda-tool-tests 06-uvm-libs 07-assertions 08-weird-syntax 09-lrm-examples; do
-  python3 tests/run_corpus.py build ../sv_test/$c --no-parity \
-      --out $T/$c/summary --cases $T/$c/cases --jsonl $T/$c/results.jsonl \
-      > $T/$c/stdout.txt 2>&1
-  echo "$c exit=$?"; tail -12 $T/$c/stdout.txt
-done
+DIR=<委派方指定的目录>
+T=/tmp/svfmt-corpus/$(echo $DIR | tr / _)
+mkdir -p $T
+python3 tests/run_corpus.py build ../sv_test/$DIR --no-parity \
+    --out $T/summary --cases $T/cases --jsonl $T/results.jsonl > $T/stdout.txt 2>&1
+echo "exit=$?"; cat $T/stdout.txt
 ```
 
-脚本退出码非 0 表示该类别存在安全失败，这是预期情况，不是脚本错误。
+脚本退出码非 0 表示存在安全失败，这是预期情况，不是脚本错误。
 
 ### 输出说明
 
@@ -118,19 +118,18 @@ done
 
 ## 6. 交付物
 
-写入 `reports/corpus-safety-<YYYYMMDD>.md`，格式如下：
+写入 `reports/corpus-safety-<目录名，/ 换成 _>-<YYYYMMDD>.md`，格式如下：
 
 ```markdown
 # 语料语义安全测试报告 <日期>
 
 svfmt commit: <git rev-parse --short HEAD>
-语料: ../sv_test (<文件数>)
+测试目录: ../sv_test/<DIR> (<文件数>)
 
 ## 总表
 
-| 类别 | 文件数 | ok_formatted | ok_rejected | semantic_change | rejected_but_changed | crash | timeout | not_idempotent |
+| 仓库（目录下一级） | 文件数 | ok_formatted | ok_rejected | semantic_change | rejected_but_changed | crash | timeout | not_idempotent |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 01-sv-compliance | ... |
 | ... |
 | 合计 | ... |
 
