@@ -1254,6 +1254,9 @@ std::vector<std::string> StubDefinitions(std::string_view text,
       static constexpr std::string_view kExprChars = "=(,[{?+-*/%&|^~!<>#'";
       if (kExprChars.find(c) != std::string_view::npos) info.expression = true;
       if (p >= 6 && text.substr(p - 6, 6) == "return") info.expression = true;
+      // "[0:`W-1]": after ':' an argument-less macro is a value; one with
+      // arguments may be a statement ("1: `uvm_info(...)").
+      if (c == ':' && (end >= text.size() || text[end] != '(')) info.expression = true;
     }
     if (offset >= 2 && p == offset && std::strchr("hHdDbBoO", text[offset - 1]) &&
         (text[offset - 2] == '\'' ||
@@ -1390,7 +1393,7 @@ absl::StatusOr<std::unique_ptr<SlangAnalyzer>> SlangAnalyzer::AnalyzeWithMode(
       AnalyzerOptions stubbed = options;
       stubbed.stubbed_macros = stubs;
       auto retry = AnalyzeWithMode(text, filename, stubbed, mode, all_branches);
-      if (!retry.ok() && other_errors) {
+      if (!retry.ok()) {
         // Try again with argument-less item macros expanding to nothing.
         std::vector<std::string> alt = StubDefinitions(text, unknown_macros, true);
         if (alt != stubs) {

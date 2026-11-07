@@ -205,12 +205,21 @@ static bool IgnoreWithinPortDeclarationPartitionGroup(
   // Ignore .x or .x(x) port declarations.
   // These can appear in a list_of_port_or_port_declarations.
   CHECK_NOTNULL(uwline.Origin());
-  // svfmt: non-ANSI port references and explicit ports (".a(b)").
-  const auto tag = uwline.Origin()->Tag().tag;
-  return uwline.Origin()->Kind() == verible::SymbolKind::kNode &&
-         (tag == static_cast<int>(SyntaxKind::ImplicitNonAnsiPort) ||
-          tag == static_cast<int>(SyntaxKind::ExplicitNonAnsiPort) ||
-          tag == static_cast<int>(SyntaxKind::ExplicitAnsiPort));
+  // svfmt: non-ANSI port references, explicit ports (".a(b)"), and ANSI
+  // ports with no direction or type ("b" in "input logic a, b"), which
+  // Verible parses as kPort.
+  if (uwline.Origin()->Kind() != verible::SymbolKind::kNode) return false;
+  const auto &origin = verible::SymbolCastToNode(*uwline.Origin());
+  const auto tag = origin.Tag().tag;
+  if (tag == static_cast<int>(SyntaxKind::ImplicitAnsiPort)) {
+    const auto *first = origin.children().begin() == origin.children().end()
+                            ? nullptr
+                            : origin.children().begin()->get();
+    return first != nullptr && first->Tag().tag == static_cast<int>(SyntaxKind::Declarator);
+  }
+  return tag == static_cast<int>(SyntaxKind::ImplicitNonAnsiPort) ||
+         tag == static_cast<int>(SyntaxKind::ExplicitNonAnsiPort) ||
+         tag == static_cast<int>(SyntaxKind::ExplicitAnsiPort);
 }
 
 static bool IgnoreWithinStructUnionMemberPartitionGroup(
