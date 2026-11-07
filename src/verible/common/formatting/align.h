@@ -385,19 +385,15 @@ ColumnPositionTree ScanPartitionForAlignmentCells_WithNonTreeTokens(
 
   FormatTokenRange leading_tokens(ftokens.begin(), ftokens.begin());
   FormatTokenRange trailing_tokens(ftokens.end(), ftokens.end());
-  if (origin != nullptr) {
-    // Identify the last token covered by the origin tree.
-    const SyntaxTreeLeaf *first_leaf = GetLeftmostLeaf(*origin);
-    const SyntaxTreeLeaf *last_leaf = GetRightmostLeaf(*origin);
-    CHECK_NOTNULL(first_leaf);
-    CHECK_NOTNULL(last_leaf);
+  // svfmt: a partition may hold only part of its origin (e.g. the inactive
+  // text of an `else directive); then there are no non-tree tokens to scan.
+  const SyntaxTreeLeaf *first_leaf = origin ? GetLeftmostLeaf(*origin) : nullptr;
+  const SyntaxTreeLeaf *last_leaf = origin ? GetRightmostLeaf(*origin) : nullptr;
+  if (first_leaf != nullptr && last_leaf != nullptr && !ftokens.empty() &&
+      ftokens.front().Text().begin() <= first_leaf->get().text().begin() &&
+      ftokens.back().Text().end() >= last_leaf->get().text().end()) {
     const TokenInfo &first_tree_token = first_leaf->get();
     const TokenInfo &last_tree_token = last_leaf->get();
-
-    // Collect tokens excluded from SyntaxTree (delimiters and comments)
-    CHECK(!ftokens.empty());
-    CHECK(ftokens.front().Text().begin() <= first_tree_token.text().begin());
-    CHECK(ftokens.back().Text().end() >= last_tree_token.text().end());
 
     FormatTokenRange::const_iterator ftoken_it = ftokens.begin();
     // Find leading non-tree tokens range end

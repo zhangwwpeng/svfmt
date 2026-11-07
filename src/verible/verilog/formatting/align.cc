@@ -39,6 +39,7 @@
 #include "slang/syntax/SyntaxKind.h"
 #include "svfmt/group-kinds.h"
 #include "svfmt/list-kinds.h"
+#include "svfmt/slang-analyzer.h"
 #include "verible/verilog/formatting/format-style.h"
 #include "verible/verilog/parser/verilog-token-classifications.h"
 #include "verible/verilog/parser/verilog-token-enum.h"
@@ -176,6 +177,12 @@ static bool PartitionHasLeadingTokensBeforeForcedWrap(
   return ftoken_it->before.break_decision == verible::SpacingOptions::kMustWrap;
 }
 
+// svfmt: the text of an inactive `ifdef branch is part of the directive.
+static bool StartsWithDirective(verible::FormatTokenRange range) {
+  const int e = range.front().TokenEnum();
+  return IsPreprocessorKeyword(verilog_tokentype(e)) || e == svfmt::TK_SVFMT_DISABLED_TEXT;
+}
+
 static bool IgnoreCommentsAndPreprocessingDirectives(
     const TokenPartitionTree &partition) {
   const auto &uwline = partition.Value();
@@ -191,8 +198,7 @@ static bool IgnoreCommentsAndPreprocessingDirectives(
   if (PartitionHasLeadingTokensBeforeForcedWrap(partition)) return true;
 
   // ignore partitions belonging to preprocessing directives
-  return IsPreprocessorKeyword(
-      verilog_tokentype(token_range.front().TokenEnum()));
+  return StartsWithDirective(token_range);
 }
 
 static bool IgnoreWithinPortDeclarationPartitionGroup(
@@ -237,8 +243,7 @@ static bool IgnoreWithinStructUnionMemberPartitionGroup(
   }
 
   // ignore partitions belonging to preprocessing directives
-  if (IsPreprocessorKeyword(
-          verilog_tokentype(token_range.front().TokenEnum()))) {
+  if (StartsWithDirective(token_range)) {
     return true;
   }
 
@@ -897,7 +902,8 @@ static AlignedPartitionClassification AlignClassify(
 static bool IsPreprocessorDirectivePartition(const TokenPartitionTree &partition) {
   const auto range = partition.Value().TokensRange();
   return !range.empty() &&
-         IsPreprocessorControlFlow(verilog_tokentype(range.front().TokenEnum()));
+         (IsPreprocessorControlFlow(verilog_tokentype(range.front().TokenEnum())) ||
+          range.front().TokenEnum() == svfmt::TK_SVFMT_DISABLED_TEXT);
 }
 
 static std::vector<TaggedTokenPartitionRange> GetConsecutiveModuleItemGroups(

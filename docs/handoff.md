@@ -72,4 +72,8 @@ build/svfmt --dump_cst x.sv; build/svfmt --show_token_partition_tree x.sv
    gives the macro its own partition, which Verible does in some contexts
    but not this one). From 07-assertions: when an `if` header with tabs is
    kept verbatim and "begin // c" follows, the first comment in the block
-   gains one column on the second pass (Verible: same).
+   gains one column on the second pass (Verible: same). From
+   08-weird-syntax: a comment line between "end" and "else" becomes an EOL
+   comment of "end", and the second pass joins "else" with its single
+   statement (Verible: same); more `infer` flips on leading-comma lists
+   (Verible: same).
