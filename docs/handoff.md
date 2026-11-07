@@ -64,4 +64,10 @@ build/svfmt --dump_cst x.sv; build/svfmt --show_token_partition_tree x.sv
    via `` are rejected by re-parse (Verible formats them and changes the
    expansion). From 03-verilog-designs: leading-comma named port
    connections with EOL comments under `named_port_alignment=infer` flip
-   from align to preserve on the second pass (Verible: same).
+   from align to preserve on the second pass (Verible: same). From
+   06-uvm-libs: `formal_parameters_alignment=infer` on a continued
+   parameter list flips align -> flush-left (Verible: same); a parameter
+   whose value is an argument-less macro followed by ", // long comment"
+   breaks before the ',' on the first pass (Verible keeps the line; svfmt
+   gives the macro its own partition, which Verible does in some contexts
+   but not this one).

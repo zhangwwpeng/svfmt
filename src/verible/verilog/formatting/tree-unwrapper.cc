@@ -1981,6 +1981,9 @@ static void ReshapeConditionalConstruct(const SyntaxTreeNode &conditional,
     VLOG(4) << "there was no else clause";
     return;
   }
+  // svfmt: "if (...) x;" may come from a macro expansion, leaving only the
+  // else clause in this file.
+  if (GetAnyConditionalIfClause(conditional) == nullptr) return;
   VLOG(4) << "there was an else clause";
   if (!style.wrap_end_else_clauses) {
     MergeEndElseWithoutLabel(conditional, partition_ptr);
