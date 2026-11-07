@@ -103,6 +103,14 @@ inline bool IsInsideAnyOf(const verible::SyntaxTreeContext &context,
   });
 }
 
+// slang models assignments ("a = b", "a <= b", "a += b") as binary
+// expressions; Verible does not (kNetVariableAssignment, ...).
+bool IsAssignmentKind(SyntaxKind kind);
+
+// A binary expression in Verible's sense: slang binary expression kinds
+// except assignments.
+bool IsVerilogBinaryExpressionKind(SyntaxKind kind);
+
 }  // namespace svfmt
 
 #endif  // SVFMT_SYNTAX_CONTEXT_H_

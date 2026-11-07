@@ -355,6 +355,20 @@ static verible::Interval<int> DisableByteOffsetRange(
   return {range.first + 1, range.second};
 }
 
+// svfmt: Verible's kNetVariableAssignment / kBlockingAssignmentStatement is
+// an ExpressionStatement holding an AssignmentExpression ("x = y;"), but not a
+// nonblocking assignment.
+static bool IsBlockingAssignmentStatement(const verible::Symbol &origin) {
+  if (origin.Kind() != verible::SymbolKind::kNode ||
+      origin.Tag().tag != static_cast<int>(slang::syntax::SyntaxKind::ExpressionStatement)) {
+    return false;
+  }
+  const auto &node = verible::SymbolCastToNode(origin);
+  return !node.empty() && node.front() &&
+         node.front()->Tag().tag ==
+             static_cast<int>(slang::syntax::SyntaxKind::AssignmentExpression);
+}
+
 // Decided at each node in UnwrappedLine partition tree whether or not
 // it should be expanded or unexpanded.
 static void DeterminePartitionExpansion(
@@ -490,8 +504,7 @@ static void DeterminePartitionExpansion(
 
     case PartitionPolicyEnum::kFitOnLineElseExpand: {
       if (uwline.Origin() &&
-          (uwline.Origin()->Tag().tag ==
-               static_cast<int>(slang::syntax::SyntaxKind::ExpressionStatement) ||
+          (IsBlockingAssignmentStatement(*uwline.Origin()) ||
            uwline.Origin()->Tag().tag ==
                static_cast<int>(svfmt::ListKind::BlockStatement_items))) {
         // Align unnamed parameters in function call. Example:

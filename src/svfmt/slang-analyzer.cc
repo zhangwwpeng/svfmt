@@ -15,12 +15,14 @@
 #include "slang/diagnostics/DiagnosticEngine.h"
 #include "slang/diagnostics/PreprocessorDiags.h"
 #include "slang/parsing/LexerFacts.h"
+#include "slang/parsing/Parser.h"
 #include "slang/parsing/Preprocessor.h"
 #include "slang/parsing/Token.h"
 #include "slang/syntax/AllSyntax.h"
 #include "slang/syntax/SyntaxTree.h"
 #include "slang/text/SourceManager.h"
 #include "slang/util/Bag.h"
+#include "slang/util/BumpAllocator.h"
 #include "verible/common/text/concrete-syntax-leaf.h"
 #include "verible/common/text/concrete-syntax-tree.h"
 #include "verible/common/text/token-info.h"
@@ -263,10 +265,11 @@ class SlangAnalyzer::Builder {
   std::string_view TokenAtCursor(const Token &tok) const {
     if (tok.rawText().empty()) return {};
     auto loc = tok.location();
-    if (loc.buffer() != buffer_ || loc.offset() != static_cast<size_t>(Offset(cursor_))) {
+    if (loc.buffer() != buffer_ ||
+        loc.offset() + base_offset_ != static_cast<size_t>(Offset(cursor_))) {
       return {};
     }
-    return contents_.substr(loc.offset(), tok.rawText().size());
+    return contents_.substr(loc.offset() + base_offset_, tok.rawText().size());
   }
 
   // Trivia text is sometimes a copy (e.g. inside directives), so trivia is
@@ -410,7 +413,7 @@ class SlangAnalyzer::Builder {
     const auto &last = toks.back();
     if (last.location().buffer() != buffer_) return;
     const size_t begin = static_cast<size_t>(Offset(cursor_));
-    const size_t end = last.location().offset() + last.rawText().size();
+    const size_t end = last.location().offset() + base_offset_ + last.rawText().size();
     if (end <= begin) return;
     std::string_view text = contents_.substr(begin, end - begin);
     if (verbatim) {
@@ -429,7 +432,7 @@ class SlangAnalyzer::Builder {
     if (TokenAtCursor(list.front()).empty()) return;
     const auto &last = list.back();
     const size_t begin = static_cast<size_t>(Offset(cursor_));
-    const size_t end = last.location().offset() + last.rawText().size();
+    const size_t end = last.location().offset() + base_offset_ + last.rawText().size();
     if (last.location().buffer() != buffer_ || end <= begin) return;
     std::string_view text = contents_.substr(begin, end - begin);
     // Trailing whitespace stays ordinary whitespace (it is the trivia of the
@@ -463,8 +466,10 @@ class SlangAnalyzer::Builder {
               for (size_t i = 0; i < args.args.getChildCount(); i++) {
                 auto child = args.args.getChild(i);
                 if (child.isNode()) {
-                  EmitMerged(child.node()->as<MacroActualArgumentSyntax>().tokens,
-                             MacroArg, list, /*verbatim=*/false);
+                  const auto &toks = child.node()->as<MacroActualArgumentSyntax>().tokens;
+                  if (!ConvertMacroArgExpression(toks, list)) {
+                    EmitMerged(toks, MacroArg, list, /*verbatim=*/false);
+                  }
                 } else {
                   EmitDirectiveToken(child.token(), ',', list);
                 }
@@ -535,6 +540,49 @@ class SlangAnalyzer::Builder {
     }
   }
 
+  // Like Verible's macro argument expansion: if a macro argument parses as an
+  // expression on its own, convert it into an expression subtree (so it is
+  // formatted); otherwise the caller keeps it as one MacroArg token.
+  bool ConvertMacroArgExpression(const slang::syntax::TokenList &toks, SyntaxTreeNode &list) {
+    if (toks.empty() || base_offset_ != 0) return false;
+    const Token &first = toks[0];
+    const Token &last = toks[toks.size() - 1];
+    if (first.location().buffer() != buffer_ || last.location().buffer() != buffer_) return false;
+    const size_t begin = first.location().offset();
+    const size_t end = last.location().offset() + last.rawText().size();
+    if (end <= begin) return false;
+    std::string_view text = contents_.substr(begin, end - begin);
+    if (text.find('`') != std::string_view::npos) return false;  // nested macros
+
+    auto &sm = *analyzer_.source_manager_;
+    auto alloc = std::make_unique<slang::BumpAllocator>();
+    slang::Diagnostics diags;
+    slang::SourceBuffer buffer = sm.assignText(text);
+    slang::parsing::Preprocessor pp(sm, *alloc, diags);
+    pp.pushSource(buffer);
+    slang::parsing::Parser parser(pp);
+    const SyntaxNode &expr = parser.parseExpression();
+    if (!diags.empty() || !parser.isDone()) {
+      return false;
+    }
+
+    EmitTrivia(first, list);
+    if (TokenAtCursor(first).empty()) return false;
+    const slang::BufferID saved_buffer = buffer_;
+    buffer_ = buffer.id;
+    base_offset_ = begin;
+    parent_first_.push_back(Token());
+    Child(&expr, list);
+    parent_first_.pop_back();
+    buffer_ = saved_buffer;
+    base_offset_ = 0;
+    analyzer_.macro_arg_allocs_.push_back(std::move(alloc));
+    if (static_cast<size_t>(Offset(cursor_)) != end && status_.ok()) {
+      status_ = absl::InternalError("svfmt: could not convert macro argument");
+    }
+    return true;
+  }
+
   // slang has separate '.' and '*' tokens; Verible lexes ".*" as one.
   void EmitDotStar(const Token &dot, const Token &star, SyntaxTreeNode &out) {
     EmitTrivia(dot, out);
@@ -542,7 +590,7 @@ class SlangAnalyzer::Builder {
         star.location().buffer() == buffer_ &&
         star.location().offset() == dot.location().offset() + 1) {
       out.AppendChild(std::make_unique<SyntaxTreeLeaf>(
-          Emit(TK_DOTSTAR, contents_.substr(dot.location().offset(), 2))));
+          Emit(TK_DOTSTAR, contents_.substr(dot.location().offset() + base_offset_, 2))));
     } else {
       Tok(dot, out);
       Tok(star, out);
@@ -554,7 +602,9 @@ class SlangAnalyzer::Builder {
   void Group(GroupKind kind, SyntaxTreeNode &out, Fill fill) {
     auto group = std::make_unique<SyntaxTreeNode>(static_cast<int>(kind));
     parent_first_.push_back(Token());
+    groups_.emplace_back(group.get(), &out);
     fill(*group);
+    groups_.pop_back();
     parent_first_.pop_back();
     if (!group->empty()) out.AppendChild(std::move(group));
   }
@@ -891,9 +941,16 @@ class SlangAnalyzer::Builder {
     // a macro call that expanded to nothing before "end") belong to the end
     // of the preceding list, as in Verible.
     SyntaxTreeNode *target = &out;
-    if (!out.empty() && out.back() && out.back()->Kind() == verible::SymbolKind::kNode &&
-        IsListTag(out.back()->Tag().tag)) {
-      target = &verible::SymbolCastToNode(*out.back());
+    // The first token of a synthetic group (e.g. "end" in kEnd) looks at the
+    // group's parent instead.
+    SyntaxTreeNode *holder = &out;
+    if (out.empty() && !groups_.empty() && groups_.back().first == &out) {
+      holder = groups_.back().second;
+    }
+    if (!holder->empty() && holder->back() &&
+        holder->back()->Kind() == verible::SymbolKind::kNode &&
+        IsListTag(holder->back()->Tag().tag)) {
+      target = &verible::SymbolCastToNode(*holder->back());
     }
     EmitTrivia(tok, *target);
     std::string_view text = TokenAtCursor(tok);
@@ -958,7 +1015,7 @@ class SlangAnalyzer::Builder {
         EmitTrivia(first, out);
         if (TokenAtCursor(first).empty() || last.location().buffer() != buffer_) continue;
         const size_t begin = static_cast<size_t>(Offset(cursor_));
-        const size_t end = last.location().offset() + last.rawText().size();
+        const size_t end = last.location().offset() + base_offset_ + last.rawText().size();
         Emit(TK_ATTRIBUTE, contents_.substr(begin, end - begin));
       }
       return;
@@ -1005,10 +1062,14 @@ class SlangAnalyzer::Builder {
   std::vector<CondDirective> directives_;
   size_t next_directive_ = 0;
   slang::BufferID buffer_;
+  // Added to token offsets when converting a sub-parse (macro arguments).
+  size_t base_offset_ = 0;
   const char *cursor_;
   int previous_enum_ = 0;
   verible::TokenSequence tokens_;
   absl::Status status_;
+  // Synthetic groups being filled, with their parent.
+  std::vector<std::pair<SyntaxTreeNode *, SyntaxTreeNode *>> groups_;
   // Qualifiers of a ClassMethodDeclaration, moved into its subroutine header.
   const slang::syntax::TokenList *pending_qualifiers_ = nullptr;
   // First token of each node being converted (null Token for roots/lists).

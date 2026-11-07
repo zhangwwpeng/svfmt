@@ -244,9 +244,7 @@ static bool IsTopLevelConcatenation(const verible::SyntaxTreeContext &context) {
                                      SyntaxKind::ConditionalExpression})) {
     return false;
   }
-  return !svfmt::IsInsideIf(context, [](SyntaxKind k) {
-    return slang::syntax::BinaryExpressionSyntax::isKind(k);
-  });
+  return !svfmt::IsInsideIf(context, svfmt::IsVerilogBinaryExpressionKind);
 }
 
 static bool IsAssignmentExpressionKind(SyntaxKind k) {

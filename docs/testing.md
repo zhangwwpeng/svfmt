@@ -1,12 +1,33 @@
 # Testing
 
-`ctest --test-dir build` runs three suites:
+`ctest --test-dir build` runs these suites. Configure the oracle with
+`-DSVFMT_VERIBLE_FORMAT=<path>`, using the Verible release that matches the
+ported commit (v0.0-4298-g085eef05). Older releases differ in places such as
+body-level parameter alignment.
 
 | Test | What it checks |
 | --- | --- |
 | `format_inputs` | Every `tests/inputs/*.sv` formats with `--failsafe_success=false --verify_convergence`. That covers parsing, the lossless bridge, re-parse, lexical equivalence and idempotence. |
 | `verible_diff` | Every `tests/diff/*.sv` formats byte-identical to `verible-verilog-format`. Skipped if Verible is not installed. |
 | `verible_cases` | About 2100 inputs extracted from Verible's formatter tests (`tests/verible_cases.jsonl`). Fails if fewer than `--min-same` outputs match Verible. |
+| `corpus` | Only if `-DSVFMT_CORPUS_DIR=<dir>` is set. See below. |
+
+## Corpus test (real code)
+
+`tests/run_corpus.py <build> <dir>` runs every `.sv/.svh/.v/.vh` file under
+`<dir>`. Semantic safety is checked first, and any failure here is a bug:
+
+- **Formatted:** `svfmt-lexcmp` (`tools/lexcmp.cpp`) re-lexes input and output
+  with slang's raw lexer, with no preprocessing and no code shared with the
+  formatter. Only whitespace may differ. Formatting the output again must
+  not change it.
+- **Refused** (parse errors, unsupported constructs): the output must be the
+  input, byte for byte. svfmt may refuse to format; it must never change the
+  meaning of the code, including code with syntax errors.
+- No crashes and no timeouts.
+
+Parity with Verible is reported as statistics only. `--out DIR` lists every
+failure and every file that differs from Verible.
 
 ## Verible test corpus
 
@@ -32,7 +53,7 @@ kept only for reference. Results fall into these buckets:
 `--out DIR` writes every non-matching case to a file, and
 `tools/show_cases.py` prints them.
 
-Current result: 1593 same, 120 diff, 375 rejected, 0 crash.
+Current result (oracle v0.0-4298): 1656 same, 74 diff, 381 rejected, 0 crash.
 
 ## Built-in safety checks
 

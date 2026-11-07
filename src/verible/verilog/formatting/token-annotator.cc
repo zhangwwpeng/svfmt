@@ -62,7 +62,7 @@ static bool IsPrefixUnaryKind(SyntaxKind k) {
   return slang::syntax::PrefixUnaryExpressionSyntax::isKind(k);
 }
 static bool IsBinaryExpressionKind(SyntaxKind k) {
-  return slang::syntax::BinaryExpressionSyntax::isKind(k);
+  return svfmt::IsVerilogBinaryExpressionKind(k);
 }
 
 // Signal that spacing was not explicitly handled in case logic.

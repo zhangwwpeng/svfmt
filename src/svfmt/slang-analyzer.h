@@ -30,6 +30,7 @@
 #include "verible/common/text/text-structure.h"
 
 namespace slang {
+class BumpAllocator;
 class SourceManager;
 namespace syntax {
 class SyntaxNode;
@@ -97,6 +98,8 @@ class SlangAnalyzer {
       const ParseMode *mode, bool all_branches);
 
   std::string original_text_;
+  // Keeps sub-parses of macro arguments alive (origins_ points into them).
+  std::vector<std::unique_ptr<slang::BumpAllocator>> macro_arg_allocs_;
   std::unique_ptr<slang::SourceManager> source_manager_;
   std::shared_ptr<slang::syntax::SyntaxTree> tree_;
   std::unique_ptr<verible::TextStructureView> data_;

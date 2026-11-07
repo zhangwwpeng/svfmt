@@ -6,6 +6,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(SVFMT_BUILD_TESTS "Build svfmt tests" ON)
+set(SVFMT_VERIBLE_FORMAT "verible-verilog-format" CACHE STRING
+    "verible-verilog-format used as the oracle in differential tests (use the release matching the ported Verible commit)")
+set(SVFMT_CORPUS_DIR "" CACHE PATH "Optional directory of SystemVerilog files for the corpus test")
 
 # --- Dependencies -----------------------------------------------------------
 
@@ -47,6 +50,10 @@ target_link_libraries(svfmt_core PUBLIC
 add_executable(svfmt src/main.cpp)
 target_link_libraries(svfmt PRIVATE svfmt_core absl::log_initialize)
 
+# Independent whitespace-only-difference checker used by the corpus tests.
+add_executable(svfmt-lexcmp tools/lexcmp.cpp)
+target_link_libraries(svfmt-lexcmp PRIVATE slang::slang)
+
 if(SVFMT_BUILD_TESTS)
   enable_testing()
   add_test(NAME format_inputs
@@ -55,6 +62,7 @@ if(SVFMT_BUILD_TESTS)
   add_test(NAME verible_diff
            COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_diff.sh $<TARGET_FILE:svfmt>
                    ${CMAKE_CURRENT_SOURCE_DIR}/tests/diff)
+  set_tests_properties(verible_diff PROPERTIES ENVIRONMENT "VERIBLE_FORMAT=${SVFMT_VERIBLE_FORMAT}")
 endif()
 
 if(SVFMT_BUILD_TESTS)
@@ -65,6 +73,13 @@ if(SVFMT_BUILD_TESTS)
     add_test(NAME verible_cases
              COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_verible_cases.py
                      $<TARGET_FILE:svfmt> ${CMAKE_CURRENT_SOURCE_DIR}/tests/verible_cases.jsonl
-                     --min-same 1590)
+                     --min-same 1650)
+    set_tests_properties(verible_cases PROPERTIES ENVIRONMENT "VERIBLE_FORMAT=${SVFMT_VERIBLE_FORMAT}")
+    if(SVFMT_CORPUS_DIR)
+      add_test(NAME corpus
+               COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_corpus.py
+                       ${CMAKE_BINARY_DIR} ${SVFMT_CORPUS_DIR} --verible ${SVFMT_VERIBLE_FORMAT}
+                       --out ${CMAKE_BINARY_DIR}/corpus_report)
+    endif()
   endif()
 endif()
