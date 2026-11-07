@@ -357,7 +357,7 @@ class SlangAnalyzer::Builder {
     // macro usage itself) comes from the macro body, not from this file.
     auto trivia_list = tok.trivia();
     size_t count = trivia_list.size();
-    if (tok.location().buffer() != buffer_) {
+    if (analyzer_.source_manager_->isMacroLoc(tok.location())) {
       while (count > 0 && trivia_list[count - 1].kind != TriviaKind::Directive) --count;
     }
     for (size_t i = 0; i < count; ++i) {
