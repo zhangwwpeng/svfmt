@@ -32,7 +32,7 @@ kept only for reference. Results fall into these buckets:
 `--out DIR` writes every non-matching case to a file, and
 `tools/show_cases.py` prints them.
 
-Current result: 1268 same, 442 diff, 378 rejected, 0 crash.
+Current result: 1593 same, 120 diff, 375 rejected, 0 crash.
 
 ## Built-in safety checks
 

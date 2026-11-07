@@ -2,12 +2,13 @@
 # Differential test: compare svfmt output with verible-verilog-format.
 # usage: run_diff.sh <svfmt> <dir> [-v]
 svfmt="$1"; dir="$2"; verbose="$3"
-command -v verible-verilog-format >/dev/null || { echo "verible-verilog-format not found, skipping"; exit 0; }
+verible="${VERIBLE_FORMAT:-verible-verilog-format}"
+command -v "$verible" >/dev/null || { echo "$verible not found, skipping"; exit 0; }
 tmp=$(mktemp -d)
 pass=0; fail=0
 for f in "$dir"/*.sv; do
   b=$(basename "$f")
-  verible-verilog-format "$f" > "$tmp/want_$b" 2>/dev/null
+  "$verible" "$f" > "$tmp/want_$b" 2>/dev/null
   "$svfmt" "$f" > "$tmp/got_$b" 2>"$tmp/err_$b"
   if cmp -s "$tmp/want_$b" "$tmp/got_$b"; then
     pass=$((pass+1))

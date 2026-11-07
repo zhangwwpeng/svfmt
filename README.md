@@ -13,7 +13,7 @@ flags are the same as `verible-verilog-format`'s.
 
 - Formats modules, ports, parameters, instances, statements, functions and
   tasks, classes, packages, generate blocks, macros and `` `ifdef `` regions.
-- Of 2088 inputs taken from Verible's own formatter tests, **1268 produce
+- Of 2088 inputs taken from Verible's own formatter tests, **1593 produce
   output byte-identical to `verible-verilog-format`**. 378 are rejected, most
   of them because they are not legal SystemVerilog (see
   [docs/deviations.md](docs/deviations.md)), and the rest differ. No input

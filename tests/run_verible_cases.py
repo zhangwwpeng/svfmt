@@ -17,6 +17,9 @@ import os
 import subprocess
 import tempfile
 
+# Oracle binary; override with VERIBLE_FORMAT=/path/to/verible-verilog-format.
+VERIBLE = os.environ.get('VERIBLE_FORMAT', 'verible-verilog-format')
+
 p = argparse.ArgumentParser()
 p.add_argument('svfmt')
 p.add_argument('cases')
@@ -36,7 +39,7 @@ def run(idx_case):
     path = os.path.join(tmpdir, f'c{idx}.sv')
     with open(path, 'w') as f:
         f.write(case['input'])
-    v = subprocess.run(['verible-verilog-format', '--failsafe_success=false', path],
+    v = subprocess.run([VERIBLE, '--failsafe_success=false', path],
                        capture_output=True, text=True)
     if v.returncode != 0:
         return idx, 'verible_rejects', '', '', v.stderr

@@ -882,6 +882,15 @@ static AlignedPartitionClassification AlignClassify(
   return {match, static_cast<int>(subtype)};
 }
 
+// svfmt: Verible's preprocessor clauses are CST nodes containing the items,
+// which naturally separates alignment groups. Here directives are their own
+// partitions with a leaf origin, so treat them as group breakers explicitly.
+static bool IsPreprocessorDirectivePartition(const TokenPartitionTree &partition) {
+  const auto range = partition.Value().TokensRange();
+  return !range.empty() &&
+         IsPreprocessorControlFlow(verilog_tokentype(range.front().TokenEnum()));
+}
+
 static std::vector<TaggedTokenPartitionRange> GetConsecutiveModuleItemGroups(
     const TokenPartitionRange &partitions, AlignmentGroupBoundary boundary) {
   VLOG(2) << __FUNCTION__;
@@ -889,6 +898,9 @@ static std::vector<TaggedTokenPartitionRange> GetConsecutiveModuleItemGroups(
       partitions,  //
       [boundary](const TokenPartitionTree &partition)
           -> AlignedPartitionClassification {
+        if (IsPreprocessorDirectivePartition(partition)) {
+          return {AlignmentGroupAction::kNoMatch};
+        }
         const Symbol *origin = partition.Value().Origin();
         if (origin == nullptr) {
           if (SeparatorCommentsBreakGroups(boundary) &&
@@ -932,6 +944,9 @@ static std::vector<TaggedTokenPartitionRange> GetConsecutiveClassItemGroups(
       partitions,  //
       [boundary](const TokenPartitionTree &partition)
           -> AlignedPartitionClassification {
+        if (IsPreprocessorDirectivePartition(partition)) {
+          return {AlignmentGroupAction::kNoMatch};
+        }
         const Symbol *origin = partition.Value().Origin();
         if (origin == nullptr) {
           if (SeparatorCommentsBreakGroups(boundary) &&
@@ -960,6 +975,9 @@ static std::vector<TaggedTokenPartitionRange> GetAlignableStatementGroups(
       partitions,  //
       [boundary](const TokenPartitionTree &partition)
           -> AlignedPartitionClassification {
+        if (IsPreprocessorDirectivePartition(partition)) {
+          return {AlignmentGroupAction::kNoMatch};
+        }
         const Symbol *origin = partition.Value().Origin();
         if (origin == nullptr) {
           if (SeparatorCommentsBreakGroups(boundary) &&

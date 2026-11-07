@@ -13,7 +13,7 @@
 - [x] Excerpt parse modes and automatic module-body retry
 - [x] Undefined macros: tolerated, with stub re-parse
 - [x] `` `ifdef ``: all-branches parse with fallback
-- [x] Differential test infrastructure (Verible corpus, 1268/2088 identical)
+- [x] Differential test infrastructure (Verible corpus, 1593/2088 identical)
 
 ## Next (ordered by test impact)
 

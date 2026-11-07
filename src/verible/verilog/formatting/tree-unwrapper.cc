@@ -762,6 +762,9 @@ void TreeUnwrapper::InterChildNodeHook(const SyntaxTreeNode &node) {
     case static_cast<int>(ListKind::DistConstraintList_items):
     case static_cast<int>(ListKind::StructUnionType_members):
     case static_cast<int>(ListKind::CovergroupDeclaration_members):
+    case static_cast<int>(ListKind::SpecifyBlock_items):
+    case static_cast<int>(ListKind::ClockingDeclaration_items):
+    case static_cast<int>(ListKind::UdpBody_entries):
       LookAheadBeyondCurrentNode();
       break;
     case static_cast<int>(ListKind::ArgumentList_parameters):
@@ -883,7 +886,8 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
   // ---- List nodes (Verible's *List nonterminals) ----
   if (svfmt::IsListTag(tag)) {
     if (IsEmptyListWithoutComments(node) &&
-        tag != Tag(ListKind::CompilationUnit_members)) {
+        tag != Tag(ListKind::CompilationUnit_members) &&
+        tag != Tag(ListKind::SpecifyBlock_items)) {
       return;  // absent in Verible's CST; nothing to visit
     }
     switch (static_cast<ListKind>(tag)) {
@@ -1348,7 +1352,22 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
 
     // UDPs: kUdpPrimitive, kUdpBody, port declarations, table entries.
     case SyntaxKind::UdpDeclaration:
+    case SyntaxKind::SpecifyBlock:
       VisitIndentedSection(node, 0, PartitionPolicyEnum::kAlwaysExpand);
+      break;
+    // kSpecifyItem
+    case SyntaxKind::SystemTimingCheck:
+    case SyntaxKind::PathDeclaration:
+    case SyntaxKind::ConditionalPathDeclaration:
+    case SyntaxKind::IfNonePathDeclaration:
+    case SyntaxKind::PulseStyleDeclaration:
+    case SyntaxKind::SpecparamDeclaration:
+      if (svfmt::IsInside(Context(), SyntaxKind::SpecifyBlock) &&
+          DirectParentTag(Context()) == Tag(ListKind::SpecifyBlock_items)) {
+        VisitIndentedSection(node, 0, PartitionPolicyEnum::kFitOnLineElseExpand);
+      } else {
+        TraverseChildren(node);
+      }
       break;
     // kModportSimplePortsDeclaration, kModportTFPortsDeclaration
     case SyntaxKind::ModportSimplePortList:
