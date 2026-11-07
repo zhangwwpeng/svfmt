@@ -1344,6 +1344,7 @@ void TabularAlignTokenPartitions(const FormatStyle &style,
           {static_cast<int>(ListKind::ClassDeclaration_items), &AlignClassItems},
           // various case-like constructs:
           {static_cast<int>(ListKind::CaseStatement_items), &AlignCaseItems},
+          {static_cast<int>(ListKind::RandCaseStatement_items), &AlignCaseItems},
           {static_cast<int>(ListKind::CaseGenerate_items), &AlignCaseItems},
           {static_cast<int>(ListKind::EnumType_members), &AlignEnumItems},
           // align various statements, like assignments

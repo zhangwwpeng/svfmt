@@ -871,6 +871,7 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
       case ListKind::BlockStatement_items:
       case ListKind::FunctionDeclaration_items:
       case ListKind::CaseStatement_items:
+      case ListKind::RandCaseStatement_items:
       case ListKind::CaseGenerate_items:
       case ListKind::ClassDeclaration_items:
       case ListKind::ModuleDeclaration_members:
@@ -887,6 +888,13 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
       case ListKind::UdpBody_portDecls:
         VisitIndentedSection(node, 0, PartitionPolicyEnum::kAlwaysExpand);
         return;
+      // kPackageImportList in a module header
+      case ListKind::ModuleHeader_imports: {
+        if (node.empty()) break;
+        const int indent = suppress_indentation ? 0 : style_.indentation_spaces;
+        VisitIndentedSection(node, indent, PartitionPolicyEnum::kAlwaysExpand);
+        return;
+      }
       case ListKind::UdpBody_entries:
         VisitIndentedSection(node, suppress_indentation ? 0 : style_.indentation_spaces,
                              PartitionPolicyEnum::kAlwaysExpand);
@@ -1181,6 +1189,7 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
     case SyntaxKind::StandardCaseItem:
     case SyntaxKind::DefaultCaseItem:
     case SyntaxKind::PatternCaseItem:
+    case SyntaxKind::RandCaseItem:
     case SyntaxKind::HierarchicalInstance:
     case SyntaxKind::ElseClause:
     case SyntaxKind::ClassPropertyDeclaration:

@@ -532,6 +532,20 @@ class SlangAnalyzer::Builder {
     }
   }
 
+  // slang has separate '.' and '*' tokens; Verible lexes ".*" as one.
+  void EmitDotStar(const Token &dot, const Token &star, SyntaxTreeNode &out) {
+    EmitTrivia(dot, out);
+    if (!TokenAtCursor(dot).empty() && star.trivia().empty() &&
+        star.location().buffer() == buffer_ &&
+        star.location().offset() == dot.location().offset() + 1) {
+      out.AppendChild(std::make_unique<SyntaxTreeLeaf>(
+          Emit(TK_DOTSTAR, contents_.substr(dot.location().offset(), 2))));
+    } else {
+      Tok(dot, out);
+      Tok(star, out);
+    }
+  }
+
   // Runs `fill` to populate a synthetic group node appended to `out`.
   template <typename Fill>
   void Group(GroupKind kind, SyntaxTreeNode &out, Fill fill) {
@@ -729,19 +743,14 @@ class SlangAnalyzer::Builder {
         return true;
       }
       case SyntaxKind::WildcardPortConnection: {
-        // slang has separate '.' and '*' tokens; Verible lexes ".*".
         const auto &n = node.as<WildcardPortConnectionSyntax>();
         List(n.attributes, static_cast<int>(ListKind::WildcardPortConnection_attributes), out);
-        EmitTrivia(n.dot, out);
-        std::string_view dot = TokenAtCursor(n.dot);
-        if (!dot.empty() && n.star.trivia().empty() && n.star.location().buffer() == buffer_ &&
-            n.star.location().offset() == n.dot.location().offset() + 1) {
-          out.AppendChild(std::make_unique<SyntaxTreeLeaf>(
-              Emit(TK_DOTSTAR, contents_.substr(n.dot.location().offset(), 2))));
-        } else {
-          Tok(n.dot, out);
-          Tok(n.star, out);
-        }
+        EmitDotStar(n.dot, n.star, out);
+        return true;
+      }
+      case SyntaxKind::WildcardPattern: {
+        const auto &n = node.as<WildcardPatternSyntax>();
+        EmitDotStar(n.dot, n.star, out);
         return true;
       }
       case SyntaxKind::FunctionDeclaration:

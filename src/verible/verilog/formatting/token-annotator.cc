@@ -31,6 +31,7 @@
 #include "verible/common/util/with-reason.h"
 #include "slang/syntax/AllSyntax.h"
 #include "svfmt/slang-analyzer.h"
+#include "svfmt/group-kinds.h"
 #include "svfmt/syntax-context.h"
 #include "verible/verilog/formatting/format-style.h"
 #include "verible/verilog/formatting/verilog-token.h"
@@ -545,7 +546,9 @@ static WithReason<int> SpacesRequiredBetween(
   if ((right.TokenEnum() == verilog_tokentype::TK_INCR ||
        right.TokenEnum() == verilog_tokentype::TK_DECR) &&
       (DirectParentIs(right_context, SyntaxKind::UnaryPreincrementExpression) ||
-       DirectParentIs(right_context, SyntaxKind::UnaryPredecrementExpression))) {
+       DirectParentIs(right_context, SyntaxKind::UnaryPredecrementExpression)) &&
+      // Verible: a statement "++k;" is not a kIncrementDecrementExpression.
+      AncestorKind(right_context, 1) != SyntaxKind::ExpressionStatement) {
     return {1, "Space before prefix '++'/'--'."};
   }
   if (right.TokenEnum() == verilog_tokentype::TK_TRIGGER ||
@@ -596,7 +599,9 @@ static WithReason<int> SpacesRequiredBetween(
     const bool is_instantiation_type =
         AncestorKind(left_context, 1) == SyntaxKind::NamedType &&
         (AncestorKind(left_context, 2) == SyntaxKind::DataDeclaration ||
-         AncestorKind(left_context, 2) == SyntaxKind::ClassPropertyDeclaration);
+         AncestorKind(left_context, 2) == SyntaxKind::ClassPropertyDeclaration ||
+         AncestorKind(left_context, 2) == svfmt::G(svfmt::GroupKind::kInstantiationType) ||
+         AncestorKind(left_context, 2) == SyntaxKind::StructUnionMember);
 
     if (DirectParentIs(left_context, SyntaxKind::ClassName) &&
         !is_instantiation_type &&
