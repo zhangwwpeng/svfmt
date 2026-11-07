@@ -1000,9 +1000,7 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
       case ListKind::DataDeclaration_declarators:
       case ListKind::HierarchyInstantiation_instances:
       case ListKind::PrimitiveInstantiation_instances:
-      case ListKind::MacroFormalArgumentList_args:
-      case ListKind::ModportSimplePortList_ports:
-      case ListKind::ModportSubroutinePortList_ports: {
+      case ListKind::MacroFormalArgumentList_args: {
         const int indent = suppress_indentation ? 0 : style_.wrap_spaces;
         VisitIndentedSection(node, indent, PartitionPolicyEnum::kFitOnLineElseExpand);
         return;
@@ -1318,6 +1316,12 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
     // UDPs: kUdpPrimitive, kUdpBody, port declarations, table entries.
     case SyntaxKind::UdpDeclaration:
       VisitIndentedSection(node, 0, PartitionPolicyEnum::kAlwaysExpand);
+      break;
+    // kModportSimplePortsDeclaration, kModportTFPortsDeclaration
+    case SyntaxKind::ModportSimplePortList:
+    case SyntaxKind::ModportSubroutinePortList:
+    case SyntaxKind::ModportClockingPort:
+      VisitIndentedSection(node, 0, PartitionPolicyEnum::kFitOnLineElseExpand);
       break;
     case SyntaxKind::UdpBody:
       VisitIndentedSection(node, suppress_indentation ? 0 : style_.indentation_spaces,

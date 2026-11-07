@@ -338,14 +338,6 @@ static WithReason<int> SpacesRequiredBetween(
 
   // TODO(fangism): Never insert trailing spaces before a newline.
 
-  // Modport port name separator, e.g. "input .a(...)". Match only the
-  // leading '.' that is a direct child of kModportSimplePort (the port
-  // name separator itself), not any '.' inside the port's expression
-  if (right.TokenEnum() == '.' &&
-      DirectParentIs(right_context, SyntaxKind::ModportExplicitPort)) {
-    return {1, "Space before modport explicit port name '.'"};
-  }
-
   // Hierarchy examples: "a.b", "a::b"
   if (left.format_token_enum == FormatTokenType::hierarchy ||
       right.format_token_enum == FormatTokenType::hierarchy) {

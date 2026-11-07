@@ -1254,12 +1254,22 @@ absl::StatusOr<std::unique_ptr<SlangAnalyzer>> SlangAnalyzer::AnalyzeWithMode(
     if (unknown_macros.empty() || (other_errors && !options.stubbed_macros.empty())) {
       return absl::InvalidArgumentError(analyzer->diagnostics_);
     }
-    if (other_errors) {
+    // An empty expansion can also parse *wrongly* without an error, e.g.
+    // "f(`M(1) + 8)" becomes "f(+8)". Re-parse with stubs whenever a stub
+    // would expand to something.
+    std::vector<std::string> stubs =
+        options.stubbed_macros.empty() ? StubDefinitions(text, unknown_macros)
+                                       : std::vector<std::string>{};
+    const bool nonempty_stub = std::any_of(stubs.begin(), stubs.end(),
+                                           [](const std::string &d) { return d.back() != '='; });
+    if (other_errors || nonempty_stub) {
       AnalyzerOptions stubbed = options;
-      stubbed.stubbed_macros = StubDefinitions(text, unknown_macros);
+      stubbed.stubbed_macros = stubs;
       stubbed.defines.insert(stubbed.defines.end(), stubbed.stubbed_macros.begin(),
                              stubbed.stubbed_macros.end());
-      return AnalyzeWithMode(text, filename, stubbed, mode, all_branches);
+      auto retry = AnalyzeWithMode(text, filename, stubbed, mode, all_branches);
+      if (retry.ok() || other_errors) return retry;
+      // Stubs made things worse; keep the empty expansion.
     }
   }
 
