@@ -116,6 +116,11 @@ echo "exit=$?"; cat $T/stdout.txt
 失败文件很多时，先按 `lexcmp.txt` 首行或 `stderr.txt` 的断言位置粗分组，每组至少
 深入分析一个代表文件，其余列入清单。
 
+**上限：找到 10 个不同根因就停止分析**，立即按第 6 节交付报告。前期很多失败是同一个
+bug 的重复，修复后会重新测试，没分析完的失败下一轮再看。报告里注明"已达 10 个根因
+上限"，未分析的失败文件放进附录，标"未分析"。分析顺序按严重程度：semantic_change >
+rejected_but_changed > crash > timeout > not_idempotent。
+
 ## 6. 交付物
 
 写入 `reports/corpus-safety-<目录名，/ 换成 _>-<YYYYMMDD>.md`，格式如下：
