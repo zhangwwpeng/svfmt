@@ -678,6 +678,47 @@ class SlangAnalyzer::Builder {
         Child(n.block.get(), out);
         return true;
       }
+      case SyntaxKind::ParameterPortList: {
+        // slang groups "#(parameter int A = 1, B = 2)" into one declaration
+        // with two declarators; Verible has one kParamDeclaration per
+        // parameter. Split them so that each parameter is a list element.
+        const auto &n = node.as<ParameterPortListSyntax>();
+        Tok(n.hash, out);
+        Tok(n.openParen, out);
+        auto list = std::make_unique<SyntaxTreeNode>(
+            static_cast<int>(ListKind::ParameterPortList_declarations));
+        parent_first_.push_back(Token());
+        for (size_t i = 0; i < n.declarations.getChildCount(); ++i) {
+          auto child = n.declarations.getChild(i);
+          if (!child.isNode()) {
+            Tok(child.token(), *list);
+            continue;
+          }
+          const SyntaxNode &decl = *child.node();
+          if (decl.kind == SyntaxKind::ParameterDeclaration) {
+            SplitParameterDeclaration(decl.as<ParameterDeclarationSyntax>(), *list);
+          } else {
+            Child(&decl, *list);
+          }
+        }
+        parent_first_.pop_back();
+        out.AppendChild(std::move(list));
+        Tok(n.closeParen, out);
+        return true;
+      }
+      case SyntaxKind::UdpSimpleField: {
+        // Verible lexes each UDP table symbol separately ("00" -> "0" "0").
+        const auto &n = node.as<UdpSimpleFieldSyntax>();
+        EmitTrivia(n.field, out);
+        std::string_view text = TokenAtCursor(n.field);
+        for (size_t i = 0; i < text.size(); ++i) {
+          const char c = text[i];
+          const int e = std::isdigit(static_cast<unsigned char>(c)) ? TK_DecNumber
+                                                                    : static_cast<unsigned char>(c);
+          out.AppendChild(std::make_unique<SyntaxTreeLeaf>(Emit(e, text.substr(i, 1))));
+        }
+        return true;
+      }
       case SyntaxKind::ClassMethodDeclaration: {
         // Qualifiers ("virtual", "static", ...) belong to the method header.
         const auto &n = node.as<ClassMethodDeclarationSyntax>();
@@ -763,6 +804,40 @@ class SlangAnalyzer::Builder {
     }
   }
 
+  void SplitParameterDeclaration(const slang::syntax::ParameterDeclarationSyntax &n,
+                                 SyntaxTreeNode &list) {
+    using namespace slang::syntax;
+    const int decl_tag = static_cast<int>(SyntaxKind::ParameterDeclaration);
+    const int declarators_tag = static_cast<int>(ListKind::ParameterDeclaration_declarators);
+    // First parameter: keyword, type, first declarator.
+    Token first = n.getFirstToken();
+    EmitTrivia(first, list);
+    auto node = std::make_unique<SyntaxTreeNode>(decl_tag);
+    analyzer_.origins_[node.get()] = &n;
+    parent_first_.push_back(first);
+    Tok(n.keyword, *node);
+    Child(n.type.get(), *node);
+    parent_first_.pop_back();
+    auto declarators = std::make_unique<SyntaxTreeNode>(declarators_tag);
+    parent_first_.push_back(Token());
+    for (size_t i = 0; i < n.declarators.getChildCount(); ++i) {
+      auto child = n.declarators.getChild(i);
+      if (!child.isNode()) {
+        // ',' between parameters: close the current one, start the next.
+        node->AppendChild(std::move(declarators));
+        list.AppendChild(std::move(node));
+        Tok(child.token(), list);
+        node = std::make_unique<SyntaxTreeNode>(decl_tag);
+        declarators = std::make_unique<SyntaxTreeNode>(declarators_tag);
+        continue;
+      }
+      Child(child.node(), *declarators);
+    }
+    parent_first_.pop_back();
+    node->AppendChild(std::move(declarators));
+    list.AppendChild(std::move(node));
+  }
+
   // Converts the members of `syntax` into `node` (generated per syntax class,
   // see tools/gen_slang_cst.py). The callbacks below are used by the
   // generated code.
@@ -784,7 +859,15 @@ class SlangAnalyzer::Builder {
  public:
   void Tok(const Token &tok, SyntaxTreeNode &out) {
     if (!tok) return;
-    EmitTrivia(tok, out);
+    // Directives right before a list terminator (`endif before endmodule, or
+    // a macro call that expanded to nothing before "end") belong to the end
+    // of the preceding list, as in Verible.
+    SyntaxTreeNode *target = &out;
+    if (!out.empty() && out.back() && out.back()->Kind() == verible::SymbolKind::kNode &&
+        IsListTag(out.back()->Tag().tag)) {
+      target = &verible::SymbolCastToNode(*out.back());
+    }
+    EmitTrivia(tok, *target);
     std::string_view text = TokenAtCursor(tok);
     if (text.empty()) return;  // macro expansion, include, missing
     int token_enum = MapToken(tok, previous_enum_);
@@ -803,6 +886,26 @@ class SlangAnalyzer::Builder {
     // token with their elements here, so directives stay inside lists.
     Token first = child->getFirstToken();
     if (first && !SameToken(first, parent_first_.back())) EmitTrivia(first, out);
+    // "`MACRO(...);" where the macro expanded to nothing: slang sees an empty
+    // item/statement. Keep the ';' with the macro call.
+    if ((child->kind == SyntaxKind::EmptyMember || child->kind == SyntaxKind::EmptyStatement) &&
+        !out.empty() && out.back() && out.back()->Kind() == verible::SymbolKind::kNode &&
+        out.back()->Tag().tag == static_cast<int>(SyntaxKind::MacroUsage)) {
+      Token semi = child->getLastToken();
+      EmitTrivia(semi, out);
+      bool same_line = true;
+      for (auto it = tokens_.rbegin(); it != tokens_.rend(); ++it) {
+        const int e = it->token_enum();
+        if (e == TK_NEWLINE) same_line = false;
+        if (e != TK_NEWLINE && e != TK_SPACE && e != TK_EOL_COMMENT && e != TK_COMMENT_BLOCK) break;
+      }
+      if (std::string_view text = TokenAtCursor(semi); !text.empty() && same_line &&
+          out.back()->Tag().tag == static_cast<int>(SyntaxKind::MacroUsage)) {
+        verible::SymbolCastToNode(*out.back())
+            .AppendChild(std::make_unique<SyntaxTreeLeaf>(Emit(';', text)));
+        return;
+      }
+    }
     auto converted = std::make_unique<SyntaxTreeNode>(static_cast<int>(child->kind));
     analyzer_.origins_[converted.get()] = child;
     parent_first_.push_back(first);

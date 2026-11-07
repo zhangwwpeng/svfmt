@@ -672,7 +672,8 @@ class ClassPropertyColumnSchemaScanner : public DataDeclarationColumnSchemaScann
 // Formal and body-level parameter declarations, e.g.
 // "localparam int [3:0] Width = 5;", "parameter type T = logic".
 // Columns: {0} keyword, {1} type / 'type', {2,i} packed dimensions,
-// {3} identifier, {4} '='.
+// {3} identifier, {4,i} unpacked dimensions, {5} '=', {6,i} dimensions of an
+// assigned type.
 class ParameterDeclarationColumnSchemaScanner : public VerilogColumnSchemaScanner {
  public:
   explicit ParameterDeclarationColumnSchemaScanner(const FormatStyle &style)
@@ -717,11 +718,22 @@ class ParameterDeclarationColumnSchemaScanner : public VerilogColumnSchemaScanne
     const auto *declarator = AsNode(declarators->front().get());
     if (!declarator || declarator->empty()) return;
     ReserveNewColumn(*declarator->front(), FlushLeft, {3});
+    if (const auto *dims = ChildWithTag(*declarator, ListKind::Declarator_dimensions)) {
+      auto *group = ReserveNewColumn(*dims, FlushLeft, {4});
+      ReserveDimensions(group, *dims, {4}, false);
+    }
     for (const auto &child : declarator->children()) {
       const auto *n = AsNode(child.get());
       if (n && (KindOfSym(*n) == SyntaxKind::EqualsValueClause ||
                 KindOfSym(*n) == SyntaxKind::EqualsTypeClause)) {
-        ReserveNewColumn(*n, FlushLeft, {4});
+        ReserveNewColumn(*n, FlushLeft, {5});
+        // "type T = int [3:0]": align the dimensions of the assigned type.
+        if (KindOfSym(*n) == SyntaxKind::EqualsTypeClause && n->size() > 1) {
+          if (const auto *tdims = PackedDimensions(AsNode(n->back().get()))) {
+            auto *group = ReserveNewColumn(*tdims, FlushLeft, {6});
+            ReserveDimensions(group, *tdims, {6}, false);
+          }
+        }
       }
     }
   }

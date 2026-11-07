@@ -203,6 +203,11 @@ static WithReason<int> SpacesRequiredBetween(
             "and \"{y}\" over \"{ y }\"."};
   }
 
+  if (DirectParentIs(right_context, SyntaxKind::UdpEdgeField) &&
+      DirectParentIs(left_context, SyntaxKind::UdpEdgeField)) {
+    return {0, "No spaces inside UDP edge fields, e.g. (01)"};
+  }
+
   // Unary operators (context-sensitive)
   if (IsUnaryPrefixExpressionOperand(left, left_context) &&
       (left.format_token_enum != FormatTokenType::binary_operator ||

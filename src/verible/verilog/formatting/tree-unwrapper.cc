@@ -884,6 +884,14 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
         return;
       }
 
+      case ListKind::UdpBody_portDecls:
+        VisitIndentedSection(node, 0, PartitionPolicyEnum::kAlwaysExpand);
+        return;
+      case ListKind::UdpBody_entries:
+        VisitIndentedSection(node, suppress_indentation ? 0 : style_.indentation_spaces,
+                             PartitionPolicyEnum::kAlwaysExpand);
+        return;
+
       // kConstraintBlockItemList, kCoverageSpecOptionList, ...
       case ListKind::ConstraintBlock_items:
       case ListKind::CovergroupDeclaration_members:
@@ -1159,7 +1167,6 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
     case SyntaxKind::ExplicitNonAnsiPort:
     case SyntaxKind::ParameterDeclarationStatement:
     case SyntaxKind::ClockingDeclaration:
-    case SyntaxKind::UdpDeclaration:
     case SyntaxKind::GenvarDeclaration:
     case SyntaxKind::IfGenerate:
     case SyntaxKind::ModuleHeader:
@@ -1276,6 +1283,21 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
       VisitIndentedSection(node, indent, PartitionPolicyEnum::kFitOnLineElseExpand);
       break;
     }
+
+    // UDPs: kUdpPrimitive, kUdpBody, port declarations, table entries.
+    case SyntaxKind::UdpDeclaration:
+      VisitIndentedSection(node, 0, PartitionPolicyEnum::kAlwaysExpand);
+      break;
+    case SyntaxKind::UdpBody:
+      VisitIndentedSection(node, suppress_indentation ? 0 : style_.indentation_spaces,
+                           PartitionPolicyEnum::kAlwaysExpand);
+      break;
+    case SyntaxKind::UdpOutputPortDecl:
+    case SyntaxKind::UdpInputPortDecl:
+    case SyntaxKind::UdpInitialStmt:
+    case SyntaxKind::UdpEntry:
+      VisitIndentedSection(node, 0, PartitionPolicyEnum::kFitOnLineElseExpand);
+      break;
 
     // kNetVariableAssignment inside a continuous assignment
     case SyntaxKind::AssignmentExpression: {
@@ -2589,6 +2611,15 @@ void TreeUnwrapper::ReshapeTokenPartitions(
       case ListKind::MacroFormalArgumentList_args:
       case ListKind::ModportDeclaration_items:
         AttachSeparatorsToListElementPartitions(&partition);
+        break;
+      case ListKind::UdpBody_portDecls:
+        // ';' separators belong to the preceding declaration.
+        for (size_t i = partition.Children().size(); i > 1; --i) {
+          auto &child = partition.Children()[i - 1];
+          if (is_leaf(child) && PartitionStartsWithSemicolon(child)) {
+            verible::MergeLeafIntoPreviousLeaf(&child);
+          }
+        }
         break;
       case ListKind::SimpleAssignmentPattern_items:
       case ListKind::StructuredAssignmentPattern_items:
