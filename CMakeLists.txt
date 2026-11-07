@@ -73,7 +73,7 @@ if(SVFMT_BUILD_TESTS)
     add_test(NAME verible_cases
              COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_verible_cases.py
                      $<TARGET_FILE:svfmt> ${CMAKE_CURRENT_SOURCE_DIR}/tests/verible_cases.jsonl
-                     --min-same 1650)
+                     --min-same 1660)
     set_tests_properties(verible_cases PROPERTIES ENVIRONMENT "VERIBLE_FORMAT=${SVFMT_VERIBLE_FORMAT}")
     if(SVFMT_CORPUS_DIR)
       add_test(NAME corpus

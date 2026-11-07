@@ -2846,7 +2846,8 @@ void TreeUnwrapper::ReshapeTokenPartitions(
 
       case SyntaxKind::MacroUsage: {
         const auto policy = partition.Value().PartitionPolicy();
-        if (policy == PartitionPolicyEnum::kStack) {
+        if (policy == PartitionPolicyEnum::kStack &&
+            FindChildNode(node, static_cast<int>(GroupKind::kParenGroup)) != nullptr) {
           MacroCallReshaper(style, &partition).Reshape();
         } else {
           const auto *paren = FindChildNode(node, static_cast<int>(GroupKind::kParenGroup));

@@ -59,7 +59,8 @@ struct ParseMode;
 struct AnalyzerOptions {
   std::vector<std::string> include_dirs;
   std::vector<std::string> defines;
-  // Set internally: stub definitions generated for unknown macros.
+  // Set internally: stub `define lines generated for unknown macros, parsed
+  // from a buffer ahead of the main one.
   std::vector<std::string> stubbed_macros;
 };
 

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstring>
 #include <map>
 #include <memory>
 #include <string>
@@ -12,6 +13,7 @@
 #include "absl/container/flat_hash_map.h"
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
+#include "absl/strings/str_join.h"
 #include "slang/diagnostics/DiagnosticEngine.h"
 #include "slang/diagnostics/PreprocessorDiags.h"
 #include "slang/parsing/LexerFacts.h"
@@ -1162,15 +1164,23 @@ bool IsIdentChar(char c) {
 
 // Builds stub definitions for macros that slang could not find (typically
 // defined in an `include that is not available). A macro used with
-// arguments in statement/item position expands to nothing; one used in an
-// expression position, or without arguments (constants, types), expands to
-// a placeholder identifier. Expansions never reach the output: only the
-// macro call text is formatted.
+// arguments in statement/item position expands to nothing, or to an empty
+// statement ';' if some use is not followed by ';' (e.g. "else `M(x)",
+// where the macro supplies the whole statement); one used in an expression
+// position, or without arguments (constants, types), expands to a
+// placeholder identifier ("0" right after a base specifier, as in
+// "32'h`ADDR"). With `items_empty`, a macro used without arguments outside
+// expressions (e.g. "`uvm_object_new" in a class body) expands to nothing
+// instead. Expansions never reach the output: only the macro call text is
+// formatted.
 std::vector<std::string> StubDefinitions(std::string_view text,
-                                         const std::vector<size_t> &usage_offsets) {
+                                         const std::vector<size_t> &usage_offsets,
+                                         bool items_empty) {
   struct Info {
     int arity = -1;  // -1: used without parentheses
     bool expression = false;
+    bool no_semicolon = false;  // some use is not followed by ';'
+    bool literal = false;       // used as the digits of a based literal
   };
   std::map<std::string, Info> infos;
   for (size_t offset : usage_offsets) {
@@ -1181,6 +1191,7 @@ std::vector<std::string> StubDefinitions(std::string_view text,
     if (name.empty()) continue;
     Info &info = infos[name];
     // Arity: count top-level commas inside the argument list.
+    size_t call_end = end;
     if (end < text.size() && text[end] == '(') {
       int depth = 0, commas = 0;
       bool in_string = false;
@@ -1194,12 +1205,18 @@ std::vector<std::string> StubDefinitions(std::string_view text,
         if (c == '"') in_string = true;
         else if (c == '(' || c == '[' || c == '{') ++depth;
         else if (c == ')' || c == ']' || c == '}') {
-          if (--depth == 0) break;
+          if (--depth == 0) {
+            call_end = i + 1;
+            break;
+          }
         } else if (c == ',' && depth == 1) {
           ++commas;
         }
       }
       info.arity = std::max(info.arity, commas + 1);
+      size_t q = call_end;
+      while (q < text.size() && std::isspace(static_cast<unsigned char>(text[q]))) ++q;
+      if (q >= text.size() || text[q] != ';') info.no_semicolon = true;
     }
     // Context: the previous non-space character.
     size_t p = offset;
@@ -1210,20 +1227,27 @@ std::vector<std::string> StubDefinitions(std::string_view text,
       if (kExprChars.find(c) != std::string_view::npos) info.expression = true;
       if (p >= 6 && text.substr(p - 6, 6) == "return") info.expression = true;
     }
+    if (offset >= 2 && p == offset && std::strchr("hHdDbBoO", text[offset - 1]) &&
+        (text[offset - 2] == '\'' ||
+         (offset >= 3 && std::strchr("sS", text[offset - 2]) && text[offset - 3] == '\''))) {
+      info.literal = true;
+    }
   }
   std::vector<std::string> defs;
   for (const auto &[name, info] : infos) {
-    std::string def = name;
+    std::string def = "`define " + name;
     if (info.arity >= 0) {
       def += '(';
       for (int i = 0; i < info.arity; ++i) {
         if (i) def += ',';
-        def += "a" + std::to_string(i);
+        def += "a" + std::to_string(i) + "=";  // empty default: uses may pass fewer
       }
       def += ')';
     }
-    def += '=';
-    if (info.arity < 0 || info.expression) def += "__svfmt_macro__";
+    if (info.literal) def += " 0";
+    else if (info.arity < 0 && !info.expression && items_empty) {}
+    else if (info.arity < 0 || info.expression) def += " __svfmt_macro__";
+    else if (info.no_semicolon) def += " ;";
     defs.push_back(std::move(def));
   }
   return defs;
@@ -1282,13 +1306,18 @@ absl::StatusOr<std::unique_ptr<SlangAnalyzer>> SlangAnalyzer::AnalyzeWithMode(
     }
   }
   slang::SourceBuffer buffer = sm.assignText(filename, parse_text);
-  if (mode != nullptr) {
-    // Wrap the excerpt in separate buffers; only main-buffer tokens become
-    // part of the token stream, so offsets are unaffected.
+  if (mode != nullptr || !options.stubbed_macros.empty()) {
+    // Stub definitions and excerpt wrappers go in separate buffers; only
+    // main-buffer tokens become part of the token stream, so offsets are
+    // unaffected.
     std::vector<slang::SourceBuffer> buffers;
-    buffers.push_back(sm.assignText("<svfmt-prolog>", mode->prolog));
+    if (!options.stubbed_macros.empty()) {
+      buffers.push_back(
+          sm.assignText("<svfmt-stubs>", absl::StrJoin(options.stubbed_macros, "\n") + "\n"));
+    }
+    if (mode != nullptr) buffers.push_back(sm.assignText("<svfmt-prolog>", mode->prolog));
     buffers.push_back(buffer);
-    buffers.push_back(sm.assignText("<svfmt-epilog>", mode->epilog));
+    if (mode != nullptr) buffers.push_back(sm.assignText("<svfmt-epilog>", mode->epilog));
     analyzer->tree_ = slang::syntax::SyntaxTree::fromBuffers(buffers, sm, bag);
   } else {
     analyzer->tree_ = slang::syntax::SyntaxTree::fromBuffer(buffer, sm, bag);
@@ -1304,10 +1333,13 @@ absl::StatusOr<std::unique_ptr<SlangAnalyzer>> SlangAnalyzer::AnalyzeWithMode(
   if (has_errors) {
     // Unknown macros alone are fine: slang skips their arguments and expands
     // them to nothing. If they broke the parse, retry once with stubs.
+    // Missing `include files are fine too: the formatter never needs their
+    // contents (macros they define become unknown macros).
     std::vector<size_t> unknown_macros;
     bool other_errors = false;
     for (const auto &diag : diagnostics) {
       if (!diag.isError()) continue;
+      if (diag.code == slang::diag::CouldNotOpenIncludeFile) continue;
       if (diag.code == slang::diag::UnknownDirective &&
           diag.location.buffer() == buffer.id) {
         unknown_macros.push_back(diag.location.offset());
@@ -1315,23 +1347,30 @@ absl::StatusOr<std::unique_ptr<SlangAnalyzer>> SlangAnalyzer::AnalyzeWithMode(
         other_errors = true;
       }
     }
-    if (unknown_macros.empty() || (other_errors && !options.stubbed_macros.empty())) {
+    if (other_errors && (unknown_macros.empty() || !options.stubbed_macros.empty())) {
       return absl::InvalidArgumentError(analyzer->diagnostics_);
     }
     // An empty expansion can also parse *wrongly* without an error, e.g.
     // "f(`M(1) + 8)" becomes "f(+8)". Re-parse with stubs whenever a stub
     // would expand to something.
     std::vector<std::string> stubs =
-        options.stubbed_macros.empty() ? StubDefinitions(text, unknown_macros)
+        options.stubbed_macros.empty() ? StubDefinitions(text, unknown_macros, false)
                                        : std::vector<std::string>{};
     const bool nonempty_stub = std::any_of(stubs.begin(), stubs.end(),
-                                           [](const std::string &d) { return d.back() != '='; });
+                                           [](const std::string &d) { return d.back() != ')'; });
     if (other_errors || nonempty_stub) {
       AnalyzerOptions stubbed = options;
       stubbed.stubbed_macros = stubs;
-      stubbed.defines.insert(stubbed.defines.end(), stubbed.stubbed_macros.begin(),
-                             stubbed.stubbed_macros.end());
       auto retry = AnalyzeWithMode(text, filename, stubbed, mode, all_branches);
+      if (!retry.ok() && other_errors) {
+        // Try again with argument-less item macros expanding to nothing.
+        std::vector<std::string> alt = StubDefinitions(text, unknown_macros, true);
+        if (alt != stubs) {
+          stubbed.stubbed_macros = std::move(alt);
+          auto retry2 = AnalyzeWithMode(text, filename, stubbed, mode, all_branches);
+          if (retry2.ok()) return retry2;
+        }
+      }
       if (retry.ok() || other_errors) return retry;
       // Stubs made things worse; keep the empty expansion.
     }
