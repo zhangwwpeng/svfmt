@@ -903,8 +903,11 @@ static WithReason<SpacingOptions> BreakDecisionBetween(
   // svfmt: a conditional or other line-oriented directive ends its line
   // ("`endif module" must not be emitted, even when the directive was
   // attached inside the next construct).
+  // Attributes and comments are not in the syntax tree; their context is that
+  // of the preceding leaf, so they say nothing about the directive.
   if (right.format_token_enum != FTT::eol_comment &&
-      right.format_token_enum != FTT::comment_block) {
+      right.format_token_enum != FTT::comment_block && left.TokenEnum() != TK_ATTRIBUTE &&
+      left.format_token_enum != FTT::comment_block) {
     for (const SyntaxKind kind :
          {SyntaxKind::IfDefDirective, SyntaxKind::IfNDefDirective, SyntaxKind::ElsIfDirective,
           SyntaxKind::ElseDirective, SyntaxKind::EndIfDirective, SyntaxKind::IncludeDirective,

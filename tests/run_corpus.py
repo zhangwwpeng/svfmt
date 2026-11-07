@@ -58,8 +58,10 @@ for root, dirs, names in os.walk(args.corpus, followlinks=True):
         continue
     seen_dirs.add(real)
     for n in names:
-        if n.endswith(('.sv', '.svh', '.v', '.vh')):
-            files.append(os.path.join(root, n))
+        path = os.path.join(root, n)
+        # isfile() also skips dangling symlinks.
+        if n.endswith(('.sv', '.svh', '.v', '.vh')) and os.path.isfile(path):
+            files.append(path)
 files.sort()
 tmpdir = tempfile.mkdtemp(prefix='svfmt_corpus_')
 

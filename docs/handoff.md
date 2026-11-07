@@ -70,4 +70,6 @@ build/svfmt --dump_cst x.sv; build/svfmt --show_token_partition_tree x.sv
    whose value is an argument-less macro followed by ", // long comment"
    breaks before the ',' on the first pass (Verible keeps the line; svfmt
    gives the macro its own partition, which Verible does in some contexts
-   but not this one).
+   but not this one). From 07-assertions: when an `if` header with tabs is
+   kept verbatim and "begin // c" follows, the first comment in the block
+   gains one column on the second pass (Verible: same).
