@@ -445,6 +445,9 @@ class SlangAnalyzer::Builder {
 
   void ConvertDirective(const SyntaxNode &syntax, SyntaxTreeNode &parent) {
     using namespace slang::syntax;
+    // Leading trivia (which may contain re-inserted conditional directives)
+    // goes before the directive, not into it.
+    EmitTrivia(syntax.getFirstToken(), parent);
     auto node = std::make_unique<SyntaxTreeNode>(static_cast<int>(syntax.kind));
     analyzer_.origins_[node.get()] = &syntax;
     switch (syntax.kind) {
