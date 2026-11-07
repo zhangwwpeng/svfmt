@@ -55,3 +55,11 @@ build/svfmt --dump_cst x.sv; build/svfmt --show_token_partition_tree x.sv
    after "`else // c" re-indenting between passes (rv_tracer te_reg.sv;
    Verible has the same non-convergence). Reports: reports/round*/
    (untracked).
+7. More known leftovers from 01-sv-compliance (all safe by default):
+   enum alignment under `infer` and comments after a ")"-with-comment
+   between parameter list and instance name do not converge (Verible: same);
+   an `endif after unparsable disabled text gets glued to the next token
+   (rejected by output verification); very long parameter lists hit the
+   line-wrap search limit; macro arguments that build escaped identifiers
+   via `` are rejected by re-parse (Verible formats them and changes the
+   expansion).

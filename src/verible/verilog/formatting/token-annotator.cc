@@ -900,6 +900,23 @@ static WithReason<SpacingOptions> BreakDecisionBetween(
             "A `define or `pragma keeps its original line structure."};
   }
 
+  // svfmt: a conditional or other line-oriented directive ends its line
+  // ("`endif module" must not be emitted, even when the directive was
+  // attached inside the next construct).
+  if (right.format_token_enum != FTT::eol_comment &&
+      right.format_token_enum != FTT::comment_block) {
+    for (const SyntaxKind kind :
+         {SyntaxKind::IfDefDirective, SyntaxKind::IfNDefDirective, SyntaxKind::ElsIfDirective,
+          SyntaxKind::ElseDirective, SyntaxKind::EndIfDirective, SyntaxKind::IncludeDirective,
+          SyntaxKind::UndefDirective, SyntaxKind::TimeScaleDirective,
+          SyntaxKind::DefaultNetTypeDirective, SyntaxKind::ResetAllDirective,
+          SyntaxKind::PragmaDirective}) {
+      if (svfmt::IsInside(left_context, kind) && !svfmt::IsInside(right_context, kind)) {
+        return {SpacingOptions::kMustWrap, "A directive ends its line."};
+      }
+    }
+  }
+
   // Check for mandatory line breaks.
   if (left.format_token_enum == FTT::eol_comment ||
       left.TokenEnum() == PP_define_body  // definition excludes trailing '\n'
