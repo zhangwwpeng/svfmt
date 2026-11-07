@@ -988,6 +988,21 @@ Status Formatter::Format(const ExecutionControl &control) {
       before.spaces = line.IndentationSpaces();
     }
   }
+  // svfmt: an escaped identifier ends at whitespace; "\\a ," must not
+  // become "\\a,". Alignment can drop that space.
+  for (auto &line : formatted_lines_) {
+    auto &tokens = line.MutableTokens();
+    for (size_t i = 1; i < tokens.size(); ++i) {
+      const auto text = tokens[i - 1].token->text();
+      if (text.empty() || text.front() != '\\') continue;
+      auto &before = tokens[i].before;
+      if ((before.action == verible::SpacingDecision::kAppend ||
+           before.action == verible::SpacingDecision::kAlign) &&
+          before.spaces == 0) {
+        before.spaces = 1;
+      }
+    }
+  }
 
   // Report any unwrapped lines that failed to complete wrap searching.
   if (!partially_formatted_lines.empty()) {

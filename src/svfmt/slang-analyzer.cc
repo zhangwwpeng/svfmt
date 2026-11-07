@@ -505,9 +505,22 @@ class SlangAnalyzer::Builder {
         EmitDirectiveToken(define.directive, PP_define, *node);
         EmitDirectiveToken(define.name, PP_Identifier, *node);
         if (define.formalArguments) {
-          // Formal arguments, verbatim (Verible keeps them in the macro name
-          // line untouched).
-          ConvertDirectiveTokens(*define.formalArguments, *node);
+          // Formal arguments (Verible keeps them in the macro name line
+          // untouched). With comments or line breaks inside, keep them as
+          // one verbatim token: their layout is part of the definition.
+          std::vector<Token> formals;
+          CollectTokens(*define.formalArguments, formals);
+          bool complex = false;
+          for (size_t i = 1; i < formals.size(); ++i) {
+            for (const auto &t : formals[i].trivia()) {
+              if (t.kind != TriviaKind::Whitespace) complex = true;
+            }
+          }
+          if (complex) {
+            EmitMerged(formals, '(', *node, /*verbatim=*/true);
+          } else {
+            ConvertDirectiveTokens(*define.formalArguments, *node);
+          }
         }
         std::vector<Token> body(define.body.begin(), define.body.end());
         EmitMerged(body, PP_define_body, *node, /*verbatim=*/true);
@@ -529,6 +542,17 @@ class SlangAnalyzer::Builder {
         EmitDisabled(branch.disabledTokens, *node);
         break;
       }
+      case SyntaxKind::PragmaDirective: {
+        // `pragma ends at the end of the line and its contents are free-form
+        // ("`pragma protect end"): keep everything after `pragma verbatim.
+        std::vector<Token> toks;
+        CollectTokens(syntax, toks);
+        if (toks.empty()) break;
+        EmitDirectiveToken(toks.front(), MapToken(toks.front(), 0), *node);
+        toks.erase(toks.begin());
+        EmitMerged(toks, PP_define_body, *node, /*verbatim=*/true);
+        break;
+      }
       case SyntaxKind::UndefDirective:
         ConvertDirectiveTokens(syntax, *node, /*name_enum=*/PP_Identifier);
         break;
@@ -537,6 +561,16 @@ class SlangAnalyzer::Builder {
         break;
     }
     if (!node->empty()) parent.AppendChild(std::move(node));
+  }
+
+  static void CollectTokens(const SyntaxNode &syntax, std::vector<Token> &out) {
+    for (size_t i = 0; i < syntax.getChildCount(); i++) {
+      if (auto *child = syntax.childNode(i)) {
+        CollectTokens(*child, out);
+      } else if (Token tok = syntax.childToken(i)) {
+        out.push_back(tok);
+      }
+    }
   }
 
   // Generic directive conversion: every token becomes a leaf.

@@ -187,6 +187,14 @@ static WithReason<int> SpacesRequiredBetween(
           << " and " << svfmt::TokenEnumName(right.TokenEnum());
   // Higher precedence rules should be handled earlier in this function.
 
+  // svfmt: after formal arguments kept as one verbatim token (they contain
+  // comments or line breaks), keep whether there was a space.
+  if (left.TokenEnum() == '(' && left.Text().size() > 1 &&
+      right.TokenEnum() == verilog_tokentype::PP_define_body) {
+    return {right.OriginalLeadingSpaces().empty() ? 0 : 1,
+            "Space after verbatim macro formal arguments"};
+  }
+
   // Preserve space after escaped identifiers.
   if (left.TokenEnum() == EscapedIdentifier) {
     return {1, "Escaped identifiers must end with whitespace."};
@@ -253,9 +261,14 @@ static WithReason<int> SpacesRequiredBetween(
     if (left.TokenEnum() == TK_LS || left.TokenEnum() == TK_RS) {
       return {0, "No space around streaming operators"};
     }
-    if (left.format_token_enum == FormatTokenType::numeric_literal ||
-        left.format_token_enum == FormatTokenType::identifier ||
-        left.format_token_enum == FormatTokenType::keyword) {
+    const auto word_like = [](const PreFormatToken &t) {
+      return t.format_token_enum == FormatTokenType::numeric_literal ||
+             t.format_token_enum == FormatTokenType::identifier ||
+             t.format_token_enum == FormatTokenType::keyword;
+    };
+    // svfmt: never glue two words together ("a with [0+:1]" would become
+    // "awith"); Verible can't parse "with" here.
+    if (word_like(left) && !word_like(right)) {
       return {0, "No space around streaming operator slice size"};
     }
   }
@@ -875,12 +888,16 @@ static WithReason<SpacingOptions> BreakDecisionBetween(
             "Macro definition body must start on same line (but may be "
             "line-continued)."};
   }
-  // svfmt: a `define ends at the end of its line; breaking anywhere in its
-  // header (e.g. a long formal argument list) would cut the definition.
-  // Verible wraps long argument lists here and breaks the macro.
-  if (svfmt::IsInside(left_context, SyntaxKind::DefineDirective) &&
-      svfmt::IsInside(right_context, SyntaxKind::DefineDirective)) {
-    return {SpacingOptions::kMustAppend, "A `define must stay on one line."};
+  // svfmt: a `define ends at the end of its line; adding or removing a line
+  // break anywhere in its header (e.g. a long formal argument list) changes
+  // the definition. Verible wraps long argument lists here and breaks the
+  // macro. Keep the original spacing.
+  if ((svfmt::IsInside(left_context, SyntaxKind::DefineDirective) &&
+       svfmt::IsInside(right_context, SyntaxKind::DefineDirective)) ||
+      (svfmt::IsInside(left_context, SyntaxKind::PragmaDirective) &&
+       svfmt::IsInside(right_context, SyntaxKind::PragmaDirective))) {
+    return {SpacingOptions::kPreserve,
+            "A `define or `pragma keeps its original line structure."};
   }
 
   // Check for mandatory line breaks.
