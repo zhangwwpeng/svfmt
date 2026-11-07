@@ -41,8 +41,11 @@ build/svfmt --dump_cst x.sv; build/svfmt --show_token_partition_tree x.sv
    module, class_package (see build/cases_report after a run).
 3. Known Verible quirks we don't mimic: "`define FOO_``BAR" spacing, and
    "interface class" indentation.
-4. The user (via vibe) is preparing a large SV corpus. Run run_corpus.py on
-   it: fix safety failures first (semantic_change / not_idempotent /
-   rejected_but_changed / crash / timeout), then parity.
+4. Corpus is at ../sv_test (26.5k files). The safety test is delegated to
+   vibe/agy using docs/corpus-safety-test.md; they write
+   reports/corpus-safety-<date>.md and must not change code. Fix the
+   reported safety failures first (semantic_change / rejected_but_changed /
+   crash / timeout / not_idempotent), then parity. A smoke run on
+   09-lrm-examples found 1 crash (clause-21/ex-21-086.sv).
 5. Not yet mapped: clocking blocks, covergroup bins details, assertion and
    property bodies, DPI, bind, constraint details, randomize-with spacing.

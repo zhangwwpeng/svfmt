@@ -3,6 +3,7 @@
 
 usage: run_corpus.py <build dir> <corpus dir> [--out DIR] [--verible PATH]
                      [--timeout SEC] [--jobs N] [--flags "..."]
+                     [--no-parity] [--cases DIR] [--jsonl FILE]
 
 For every *.sv / *.svh / *.v file under <corpus dir> (recursively):
 
@@ -18,8 +19,11 @@ Parity (statistics only): compare svfmt's output with verible-verilog-format.
 Exit status is non-zero if any safety check fails.
 """
 import argparse
+import json
+import shlex
 import concurrent.futures as cf
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -32,13 +36,18 @@ p.add_argument('--verible', default=os.environ.get('VERIBLE_FORMAT', 'verible-ve
 p.add_argument('--timeout', type=float, default=60)
 p.add_argument('--jobs', type=int, default=os.cpu_count())
 p.add_argument('--flags', default='', help='extra flags for both formatters')
+p.add_argument('--no-parity', action='store_true', help='skip the Verible comparison')
+p.add_argument('--cases', default=None,
+               help='write one directory per safety failure (input, outputs, logs, repro)')
+p.add_argument('--jsonl', default=None, help='write one JSON result per file')
 args = p.parse_args()
 
 svfmt = os.path.join(args.build, 'svfmt')
 lexcmp = os.path.join(args.build, 'svfmt-lexcmp')
 flags = args.flags.split()
-have_verible = subprocess.run(['which', args.verible], capture_output=True).returncode == 0 \
-    or os.path.exists(args.verible)
+have_verible = not args.no_parity and (
+    subprocess.run(['which', args.verible], capture_output=True).returncode == 0
+    or os.path.exists(args.verible))
 
 files = []
 for root, _, names in os.walk(args.corpus, followlinks=True):
@@ -80,6 +89,7 @@ def check(idx_path):
         else:
             rc2, out2, err2 = run([svfmt, '--failsafe_success=false', '--verify_convergence=false',
                                    *flags, tmp])
+            res['formatted2'] = out2
             if rc2 != 0 or out2 != out:
                 res['safety'] = 'not_idempotent'
                 res['detail'] = err2.decode(errors='replace')[:2000]
@@ -96,6 +106,30 @@ def check(idx_path):
     return res
 
 
+BAD = ['semantic_change', 'not_idempotent', 'rejected_but_changed', 'crash', 'timeout']
+
+
+def save_case(res):
+    name = os.path.relpath(res['path'], args.corpus).replace(os.sep, '__')
+    d = os.path.join(args.cases, res['safety'], name)
+    os.makedirs(d, exist_ok=True)
+    shutil.copyfile(res['path'], os.path.join(d, 'input.sv'))
+    open(os.path.join(d, 'output.sv'), 'wb').write(res.get('formatted', b''))
+    if 'formatted2' in res:
+        open(os.path.join(d, 'output2.sv'), 'wb').write(res['formatted2'])
+    open(os.path.join(d, 'lexcmp.txt'), 'w').write(res.get('detail', ''))
+    open(os.path.join(d, 'stderr.txt'), 'w').write(res['stderr'])
+    fmt = ' '.join(shlex.quote(x) for x in [os.path.abspath(svfmt), '--failsafe_success=false',
+                                             '--verify_convergence=false', *flags])
+    open(os.path.join(d, 'cmd.sh'), 'w').write(
+        '#!/bin/sh\n# original: %s\ncd "$(dirname "$0")"\n'
+        '%s input.sv > output.sv; echo "svfmt exit $?"\n'
+        '%s input.sv output.sv; echo "lexcmp exit $?"\n'
+        '%s output.sv > output2.sv; cmp output.sv output2.sv && echo idempotent\n'
+        % (res['path'], fmt, shlex.quote(os.path.abspath(lexcmp)), fmt))
+    os.chmod(os.path.join(d, 'cmd.sh'), 0o755)
+
+
 results = []
 with cf.ThreadPoolExecutor(max_workers=args.jobs) as ex:
     for r in ex.map(check, enumerate(files)):
@@ -106,7 +140,6 @@ def count(key, val):
     return sum(1 for r in results if r.get(key) == val)
 
 
-BAD = ['semantic_change', 'not_idempotent', 'rejected_but_changed', 'crash', 'timeout']
 print(f'files: {len(results)}')
 print('safety:')
 for k in ['ok_formatted', 'ok_rejected'] + BAD:
@@ -128,5 +161,17 @@ if args.out:
             if r.get('parity') == 'diff':
                 f.write(f"=== {r['path']}\n")
     print(f'details in {args.out}/')
+
+if args.cases:
+    for r in results:
+        if r['safety'] in BAD:
+            save_case(r)
+    print(f'failure cases in {args.cases}/')
+
+if args.jsonl:
+    with open(args.jsonl, 'w') as f:
+        for r in results:
+            f.write(json.dumps({'path': r['path'], 'safety': r['safety'],
+                                'parity': r.get('parity')}) + '\n')
 
 sys.exit(1 if any(r['safety'] in BAD for r in results) else 0)

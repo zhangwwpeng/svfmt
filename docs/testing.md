@@ -27,7 +27,12 @@ body-level parameter alignment.
 - No crashes and no timeouts.
 
 Parity with Verible is reported as statistics only. `--out DIR` lists every
-failure and every file that differs from Verible.
+failure and every file that differs from Verible. `--no-parity` skips Verible,
+`--cases DIR` saves each failure (input, outputs, logs, `cmd.sh` repro), and
+`--jsonl FILE` writes one result per file.
+
+[corpus-safety-test.md](corpus-safety-test.md) is the task brief handed to a
+helper agent to run the safety test on `../sv_test` and report root causes.
 
 ## Verible test corpus
 
