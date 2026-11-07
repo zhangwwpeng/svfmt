@@ -95,6 +95,7 @@ class TreeUnwrapper final : public verible::TreeUnwrapper {
   void Visit(const verible::SyntaxTreeNode &node) final;
 
   void SetIndentationsAndCreatePartitions(const verible::SyntaxTreeNode &node);
+  bool IsEmptyListWithoutComments(const verible::SyntaxTreeNode &node) const;
   // svfmt: second half of the slang-kind switch.
   void SetIndentationsForOtherKinds(const verible::SyntaxTreeNode &node,
                                     slang::syntax::SyntaxKind kind,

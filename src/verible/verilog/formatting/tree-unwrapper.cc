@@ -851,6 +851,18 @@ void TreeUnwrapper::Visit(const SyntaxTreeNode &node) {
 // CST-descending phase that creates partitions with correct indentation.
 // TODO(mglb): This function is > 600 lines and should probably be split
 //             up into multiple.
+// svfmt: true if an empty list node encloses no comments (then Verible's CST
+// would have no list node, so no partition is created for it).
+bool TreeUnwrapper::IsEmptyListWithoutComments(const SyntaxTreeNode &node) const {
+  if (!node.empty()) return false;
+  for (auto it = NextUnfilteredToken(); !it->isEOF(); ++it) {
+    const int e = it->token_enum();
+    if (e == TK_SPACE || e == TK_NEWLINE) continue;
+    return !IsComment(verilog_tokentype(e));
+  }
+  return true;
+}
+
 void TreeUnwrapper::SetIndentationsAndCreatePartitions(
     const SyntaxTreeNode &node) {
   const int tag = node.Tag().tag;
@@ -870,6 +882,11 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
 
   // ---- List nodes (Verible's *List nonterminals) ----
   if (svfmt::IsListTag(tag)) {
+    if (IsEmptyListWithoutComments(node) &&
+        tag != Tag(ListKind::CompilationUnit_members)) {
+      TraverseChildren(node);
+      return;
+    }
     switch (static_cast<ListKind>(tag)) {
       case ListKind::CompilationUnit_members:
         // kDescriptionList: the base class already created this partition.
@@ -883,6 +900,16 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
       case ListKind::BlockStatement_items:
       case ListKind::FunctionDeclaration_items:
       case ListKind::CaseStatement_items:
+        // kCasePatternItemList ("case ... matches") is not aligned.
+        if (std::any_of(node.children().begin(), node.children().end(),
+                        [](const verible::SymbolPtr &p) {
+                          return p && Kind(*p) == SyntaxKind::PatternCaseItem;
+                        })) {
+          VisitIndentedSection(node, suppress_indentation ? 0 : style_.indentation_spaces,
+                               PartitionPolicyEnum::kAlwaysExpand);
+          return;
+        }
+        [[fallthrough]];
       case ListKind::RandCaseStatement_items:
       case ListKind::CaseGenerate_items:
       case ListKind::ClassDeclaration_items:
@@ -952,7 +979,15 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
         return;
       }
 
-      // kPortDeclarationList
+      // kPortDeclarationList (non-ANSI module ports are also a
+      // kPortDeclarationList in Verible's CST)
+      case ListKind::NonAnsiPortList_ports:
+        if (!svfmt::IsInsideAnyOf(Context(), {SyntaxKind::ModuleHeader,
+                                              SyntaxKind::InterfaceHeader,
+                                              SyntaxKind::ProgramHeader})) {
+          break;
+        }
+        [[fallthrough]];
       case ListKind::AnsiPortList_ports: {
         const int indent =
             suppress_indentation ? 0 : style_.PortDeclarationsIndentation();
@@ -981,8 +1016,7 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
         return;
       }
 
-      // kPortList (non-ANSI module ports, task/function ports)
-      case ListKind::NonAnsiPortList_ports:
+      // kPortList (task/function ports)
       case ListKind::FunctionPortList_ports: {
         if (svfmt::IsInsideAnyOf(Context(),
                                  {SyntaxKind::DPIImport, SyntaxKind::DPIExport})) {
