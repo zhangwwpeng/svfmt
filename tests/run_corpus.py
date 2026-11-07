@@ -75,7 +75,7 @@ def check(idx_path):
     res['stderr'] = err.decode(errors='replace')[:3000]
     if rc == 'timeout':
         res['safety'] = 'timeout'
-    elif rc < 0 or b'Check failed' in err:
+    elif rc < 0 or b'] Check failed:' in err:
         res['safety'] = 'crash'
     elif rc != 0:
         res['safety'] = 'ok_rejected' if out == original else 'rejected_but_changed'

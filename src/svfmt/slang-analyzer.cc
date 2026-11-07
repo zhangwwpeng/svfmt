@@ -353,7 +353,15 @@ class SlangAnalyzer::Builder {
   // Emits leading trivia of a token. Directives are converted into CST nodes
   // and appended to `parent`.
   void EmitTrivia(const Token &tok, SyntaxTreeNode &parent) {
-    for (const Trivia &trivia : tok.trivia()) {
+    // On a token expanded from a macro, trivia after the last directive (the
+    // macro usage itself) comes from the macro body, not from this file.
+    auto trivia_list = tok.trivia();
+    size_t count = trivia_list.size();
+    if (tok.location().buffer() != buffer_) {
+      while (count > 0 && trivia_list[count - 1].kind != TriviaKind::Directive) --count;
+    }
+    for (size_t i = 0; i < count; ++i) {
+      const Trivia &trivia = trivia_list[i];
       switch (trivia.kind) {
         case TriviaKind::Whitespace:
         case TriviaKind::EndOfLine:
@@ -376,9 +384,19 @@ class SlangAnalyzer::Builder {
             EmitVerbatim(text);
           }
           break;
-        case TriviaKind::Directive:
+        case TriviaKind::Directive: {
+          // EmitTrivia may run more than once for a token. Skip a directive
+          // that was already consumed (its whitespace trivia, matched by
+          // content, could otherwise match later text), and directives from
+          // other buffers (stub definitions, excerpt wrappers).
+          const Token first = trivia.syntax()->getFirstToken();
+          if (first.location().buffer() != buffer_ ||
+              first.location().offset() + base_offset_ < static_cast<size_t>(Offset(cursor_))) {
+            break;
+          }
           ConvertDirective(*trivia.syntax(), parent);
           break;
+        }
         case TriviaKind::SkippedTokens:
         case TriviaKind::SkippedSyntax:
           if (status_.ok()) {
@@ -998,7 +1016,17 @@ class SlangAnalyzer::Builder {
     parent_first_.push_back(first);
     ConvertMembers(*child, *converted);
     parent_first_.pop_back();
-    if (!converted->empty()) out.AppendChild(std::move(converted));
+    // A node whose tokens all come from a macro expansion has no leaves
+    // (only empty lists); drop it.
+    if (HasLeaf(*converted)) out.AppendChild(std::move(converted));
+  }
+
+  static bool HasLeaf(const verible::Symbol &symbol) {
+    if (symbol.Kind() == verible::SymbolKind::kLeaf) return true;
+    for (const auto &c : verible::SymbolCastToNode(symbol).children()) {
+      if (c && HasLeaf(*c)) return true;
+    }
+    return false;
   }
 
   template <typename ListT>
