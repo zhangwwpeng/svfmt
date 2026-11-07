@@ -2589,7 +2589,8 @@ static void HandleDataDeclaration(const SyntaxTreeNode &node,
   AttachTrailingSemicolonToPreviousPartition(partition);
   auto &data_declaration_partition = *partition;
   auto &children = data_declaration_partition.Children();
-  CHECK(!children.empty());
+  // svfmt: a declaration expanded from a macro leaves only its ';' here.
+  if (children.empty()) return;
 
   // The instances/variable declaration list is always in last position.
   auto &instance_list_partition = children.back();

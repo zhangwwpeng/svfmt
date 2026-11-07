@@ -1017,8 +1017,45 @@ class SlangAnalyzer::Builder {
     ConvertMembers(*child, *converted);
     parent_first_.pop_back();
     // A node whose tokens all come from a macro expansion has no leaves
-    // (only empty lists); drop it.
-    if (HasLeaf(*converted)) out.AppendChild(std::move(converted));
+    // (only empty lists); drop it. If only its ';' is in this file
+    // ("`DECL(a);" where the macro expands to a declaration), the ';' goes
+    // with the macro call.
+    if (!HasLeaf(*converted)) return;
+    if (SymbolPtr *only = SoleLeafIn(*converted); only != nullptr &&
+        (*only)->Tag().tag == ';' && !NewlineBeforeLastToken() && !out.empty() && out.back() &&
+        out.back()->Kind() == verible::SymbolKind::kNode &&
+        out.back()->Tag().tag == static_cast<int>(SyntaxKind::MacroUsage)) {
+      verible::SymbolCastToNode(*out.back()).AppendChild(std::move(*only));
+      return;
+    }
+    out.AppendChild(std::move(converted));
+  }
+
+  // Whether a newline separates the last emitted token from the previous
+  // non-whitespace, non-comment token.
+  bool NewlineBeforeLastToken() const {
+    if (tokens_.empty()) return false;
+    for (auto it = tokens_.rbegin() + 1; it != tokens_.rend(); ++it) {
+      const int e = it->token_enum();
+      if (e == TK_NEWLINE) return true;
+      if (e != TK_SPACE && e != TK_EOL_COMMENT && e != TK_COMMENT_BLOCK) return false;
+    }
+    return false;
+  }
+
+  // Returns the slot holding the only leaf under `symbol`, or nullptr if
+  // there are none or several.
+  static SymbolPtr *SoleLeafIn(SyntaxTreeNode &node) {
+    SymbolPtr *found = nullptr;
+    for (auto &c : node.mutable_children()) {
+      if (!c || !HasLeaf(*c)) continue;
+      if (found != nullptr) return nullptr;
+      found = c->Kind() == verible::SymbolKind::kLeaf
+                  ? &c
+                  : SoleLeafIn(verible::SymbolCastToNode(*c));
+      if (found == nullptr) return nullptr;
+    }
+    return found;
   }
 
   static bool HasLeaf(const verible::Symbol &symbol) {

@@ -970,6 +970,25 @@ Status Formatter::Format(const ExecutionControl &control) {
     }
   }
 
+  // svfmt: nothing may follow an EOL comment on its line; otherwise it
+  // becomes comment text. Some layouts (e.g. comments between a case label
+  // and its statement, merged by append-fitting) can still do that, as in
+  // Verible; force a line break there.
+  for (auto &line : formatted_lines_) {
+    auto &tokens = line.MutableTokens();
+    for (size_t i = 1; i < tokens.size(); ++i) {
+      if (tokens[i - 1].token->token_enum() != verilog_tokentype::TK_EOL_COMMENT) continue;
+      auto &before = tokens[i].before;
+      if (before.action == verible::SpacingDecision::kWrap) continue;
+      if (before.action == verible::SpacingDecision::kPreserve &&
+          tokens[i].OriginalLeadingSpaces().find('\n') != std::string_view::npos) {
+        continue;
+      }
+      before.action = verible::SpacingDecision::kWrap;
+      before.spaces = line.IndentationSpaces();
+    }
+  }
+
   // Report any unwrapped lines that failed to complete wrap searching.
   if (!partially_formatted_lines.empty()) {
     std::ostringstream err_stream;
