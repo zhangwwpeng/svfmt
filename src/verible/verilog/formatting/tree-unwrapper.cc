@@ -1752,12 +1752,21 @@ static void AttachTrailingSemicolonToPreviousPartition(
   }
 }
 
+static bool PartitionIsAllComments(const TokenPartitionTree &partition) {
+  const auto tokens = partition.Value().TokensRange();
+  return !tokens.empty() && std::all_of(tokens.begin(), tokens.end(), [](const PreFormatToken &t) {
+    return IsComment(verilog_tokentype(t.TokenEnum()));
+  });
+}
+
+// svfmt: `first` skips leading partitions (comment lines before the
+// statement).
 static void AdjustSubsequentPartitionsIndentation(TokenPartitionTree *partition,
-                                                  int indentation) {
+                                                  int indentation, size_t first = 0) {
   // Adjust indentation of subsequent partitions
   const auto npartitions = partition->Children().size();
-  if (npartitions > 1) {
-    const auto &first_partition = partition->Children().front();
+  if (npartitions > first + 1) {
+    const auto &first_partition = partition->Children()[first];
     const auto &last_partition = partition->Children().back();
 
     // Do not indent intentionally wrapped partitions, e.g.
@@ -1773,7 +1782,7 @@ static void AdjustSubsequentPartitionsIndentation(TokenPartitionTree *partition,
           PartitionStartsWithCloseBrace(last_partition)) &&
         !(PartitionEndsWithOpenParen(first_partition) &&
           PartitionIsCloseParenSemi(last_partition))) {
-      for (unsigned int idx = 1; idx < npartitions; ++idx) {
+      for (size_t idx = first + 1; idx < npartitions; ++idx) {
         AdjustIndentationRelative(&partition->Children()[idx], indentation);
       }
     }
@@ -1833,6 +1842,9 @@ static void ReshapeIfClause(const SyntaxTreeNode &node,
     return;
   }
 
+  // The 'if (...)' header may have come from a macro expansion (no tokens of
+  // its own); then there is nothing in this clause to fuse 'begin' with.
+  if (partition.Children().size() < 2) return;
   // Then fuse the 'begin' partition with the preceding 'if (...)'
   auto &if_body_partition = partition.Children().back();
   auto &begin_partition = if_body_partition.Children().front();
@@ -2709,9 +2721,13 @@ void TreeUnwrapper::ReshapeTokenPartitions(
       case ListKind::HierarchicalInstance_connections:
       case ListKind::AnsiPortList_ports:
       case ListKind::NonAnsiPortList_ports:
-      case ListKind::FunctionPortList_ports:
       case ListKind::MacroFormalArgumentList_args:
       case ListKind::ModportDeclaration_items:
+        AttachSeparatorsToListElementPartitions(&partition);
+        break;
+      case ListKind::FunctionPortList_ports:
+        // Verible: kParenGroup.
+        SetCommentLinePartitionAsAlreadyFormatted(&partition);
         AttachSeparatorsToListElementPartitions(&partition);
         break;
       case ListKind::UdpBody_portDecls:
@@ -2934,7 +2950,13 @@ void TreeUnwrapper::ReshapeTokenPartitions(
         // Check body, for a begin-end block, merge 'begin' with previous sibling
         if (const auto *tbody = LastChildNode(node);
             tbody != nullptr && NodeIsBeginEndBlock(*tbody) && offsets.size() > 1) {
-          verible::MergeConsecutiveSiblings(&partition, offsets[1] - 1);
+          // A comment line before 'begin' makes the body a group; leave it.
+          const auto &children = partition.Children();
+          const size_t pos = offsets[1] - 1;
+          if (pos + 1 < children.size() &&
+              children[pos].Children().empty() == children[pos + 1].Children().empty()) {
+            verible::MergeConsecutiveSiblings(&partition, pos);
+          }
         }
         break;
       }
@@ -2944,10 +2966,17 @@ void TreeUnwrapper::ReshapeTokenPartitions(
         AttachTrailingSemicolonToPreviousPartition(&partition);
         AttachSeparatorsToListElementPartitions(&partition);
         // Merge the 'assign' keyword with the (first) x=y assignment.
-        if (partition.Children().size() > 1) {
-          verible::MergeLeafIntoNextLeaf(&partition.Children().front());
+        // svfmt: comment lines before 'assign' are partitions of their own.
+        size_t keyword = 0;
+        while (keyword + 1 < partition.Children().size() &&
+               is_leaf(partition.Children()[keyword]) &&
+               PartitionIsAllComments(partition.Children()[keyword])) {
+          ++keyword;
         }
-        AdjustSubsequentPartitionsIndentation(&partition, style.wrap_spaces);
+        if (partition.Children().size() > keyword + 1) {
+          verible::MergeLeafIntoNextLeaf(&partition.Children()[keyword]);
+        }
+        AdjustSubsequentPartitionsIndentation(&partition, style.wrap_spaces, keyword);
         break;
       }
 
@@ -2980,7 +3009,7 @@ void TreeUnwrapper::ReshapeTokenPartitions(
         // In these cases, merge the 'begin' partition of the statement block
         // with the preceding keyword or header partition.
         const auto *body = LastChildNode(node);
-        if (!partition.Children().empty() && !verible::is_leaf(partition.Children().back()) &&
+        if (partition.Children().size() > 1 && !verible::is_leaf(partition.Children().back()) &&
             body != nullptr && NodeIsBeginEndBlock(*body)) {
           auto &seq_block_partition = partition.Children().back();
           auto &begin_partition = LeftmostDescendant(seq_block_partition);

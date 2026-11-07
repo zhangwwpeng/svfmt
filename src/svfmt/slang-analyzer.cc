@@ -1498,7 +1498,10 @@ absl::StatusOr<std::unique_ptr<SlangAnalyzer>> SlangAnalyzer::AnalyzeWithMode(
                                        : std::vector<std::string>{};
     const bool nonempty_stub = std::any_of(stubs.begin(), stubs.end(),
                                            [](const std::string &d) { return d.back() != ')'; });
-    if (other_errors || nonempty_stub) {
+    // No stub could be made (e.g. an escaped macro name): retrying would
+    // parse the same text again.
+    if (stubs.empty() && other_errors) return absl::InvalidArgumentError(analyzer->diagnostics_);
+    if (!stubs.empty() && (other_errors || nonempty_stub)) {
       AnalyzerOptions stubbed = options;
       stubbed.stubbed_macros = stubs;
       auto retry = AnalyzeWithMode(text, filename, stubbed, mode, all_branches);

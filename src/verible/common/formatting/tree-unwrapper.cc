@@ -14,6 +14,7 @@
 
 #include "verible/common/formatting/tree-unwrapper.h"
 
+#include <algorithm>
 #include <functional>
 #include <iterator>
 #include <memory>
@@ -105,6 +106,18 @@ const TokenPartitionTree *TreeUnwrapper::Unwrap() {
     CHECK_EQ(active_unwrapped_lines_, &unwrapped_lines_);
     FinishUnwrappedLine();
   }
+
+  // Reshaping can leave partitions without tokens (e.g. a ';' moved into a
+  // macro call's partition); each would print as a blank line.
+  verible::ApplyPostOrder(unwrapped_lines_, [](TokenPartitionTree &node) {
+    auto &children = node.Children();
+    if (children.size() < 2) return;
+    children.erase(std::remove_if(children.begin(), children.end(),
+                                  [](const TokenPartitionTree &child) {
+                                    return is_leaf(child) && child.Value().IsEmpty();
+                                  }),
+                   children.end());
+  });
 
   VerifyFullTreeFormatTokenRanges();
 

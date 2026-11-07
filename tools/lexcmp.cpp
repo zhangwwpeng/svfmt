@@ -7,6 +7,10 @@
 // continuation inside them are compared too. (Other directives take a fixed
 // number of tokens; a line end after them means nothing.)
 //
+// Inside a UDP table (table ... endtable), symbols are single characters and
+// whitespace between them means nothing, but the lexer reads "00" or "x0" as
+// one token; table tokens are compared character by character.
+//
 // usage: svfmt-lexcmp <before.sv> <after.sv>
 // exit 0 if equivalent; 1 with a description of the first difference.
 
@@ -54,6 +58,7 @@ std::vector<Item> Lex(SourceManager &sm, const std::string &text, const char *na
   std::vector<Item> items;
   bool in_directive = false;
   bool continued = false;  // the next line end follows a "\" continuation
+  bool in_table = false;
   auto end_directive = [&] {
     if (in_directive) items.push_back({"DirectiveEnd", "", 0});
     in_directive = false;
@@ -84,8 +89,16 @@ std::vector<Item> Lex(SourceManager &sm, const std::string &text, const char *na
       end_directive();
       break;
     }
+    if (tok.kind == TokenKind::EndTableKeyword) in_table = false;
+    if (in_table) {
+      for (char c : tok.rawText()) {
+        items.push_back({"UdpSymbol", std::string(1, c), sm.getLineNumber(tok.location())});
+      }
+      continue;
+    }
     items.push_back({std::string(toString(tok.kind)), std::string(tok.rawText()),
                      sm.getLineNumber(tok.location())});
+    if (tok.kind == TokenKind::TableKeyword) in_table = true;
     if (tok.kind == TokenKind::LineContinuation) {
       continued = true;
       continue;
