@@ -16,6 +16,7 @@
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_join.h"
 #include "slang/diagnostics/DiagnosticEngine.h"
+#include "slang/diagnostics/ParserDiags.h"
 #include "slang/diagnostics/PreprocessorDiags.h"
 #include "slang/parsing/LexerFacts.h"
 #include "slang/parsing/Parser.h"
@@ -1333,6 +1334,33 @@ bool IsIdentChar(char c) {
   return std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '$';
 }
 
+// Whether the '{' or ';' at `pos` is inside the braces of a struct or union
+// ("struct packed {", "union soft {").
+bool InStructBody(std::string_view text, size_t pos) {
+  int depth = 0;
+  size_t brace = pos;
+  for (;; --brace) {
+    const char c = text[brace];
+    if (c == '}') ++depth;
+    if (c == '{' && depth-- == 0) break;
+    if (brace == 0) return false;
+  }
+  // The words before the brace, skipping qualifiers.
+  size_t end = brace;
+  while (true) {
+    while (end > 0 && std::isspace(static_cast<unsigned char>(text[end - 1]))) --end;
+    size_t begin = end;
+    while (begin > 0 && IsIdentChar(text[begin - 1])) --begin;
+    const std::string_view word = text.substr(begin, end - begin);
+    if (word == "struct" || word == "union") return true;
+    if (word != "packed" && word != "signed" && word != "unsigned" && word != "soft" &&
+        word != "tagged") {
+      return false;
+    }
+    end = begin;
+  }
+}
+
 // Builds stub definitions for macros that slang could not find (typically
 // defined in an `include that is not available). A macro used with
 // arguments in statement/item position expands to nothing, or to an empty
@@ -1352,6 +1380,7 @@ std::vector<std::string> StubDefinitions(std::string_view text,
     bool expression = false;
     bool no_semicolon = false;  // some use is not followed by ';'
     bool literal = false;       // used as the digits of a based literal
+    bool member = false;        // used as a struct/union member
   };
   std::map<std::string, Info> infos;
   for (size_t offset : usage_offsets) {
@@ -1402,6 +1431,7 @@ std::vector<std::string> StubDefinitions(std::string_view text,
       // "[0:`W-1]": after ':' an argument-less macro is a value; one with
       // arguments may be a statement ("1: `uvm_info(...)").
       if (c == ':' && (end >= text.size() || text[end] != '(')) info.expression = true;
+      if ((c == '{' || c == ';') && InStructBody(text, p - 1)) info.member = true;
     }
     if (offset >= 2 && p == offset && std::strchr("hHdDbBoO", text[offset - 1]) &&
         (text[offset - 2] == '\'' ||
@@ -1420,7 +1450,8 @@ std::vector<std::string> StubDefinitions(std::string_view text,
       }
       def += ')';
     }
-    if (info.literal) def += " 0";
+    if (info.member) def += info.no_semicolon ? " int __svfmt_macro__;" : " int __svfmt_macro__";
+    else if (info.literal) def += " 0";
     else if (info.arity < 0 && !info.expression && items_empty) {}
     else if (info.arity < 0 || info.expression) def += " __svfmt_macro__";
     else if (info.no_semicolon) def += " ;";
@@ -1475,8 +1506,16 @@ absl::StatusOr<std::unique_ptr<SlangAnalyzer>> SlangAnalyzer::AnalyzeWithMode(
   for (const auto &dir : options.include_dirs) {
     pp_options.additionalIncludePaths.emplace_back(dir);
   }
+  // SV-2023 is a superset for formatting purposes (e.g. "union soft").
+  pp_options.languageVersion = slang::LanguageVersion::v1800_2023;
+  slang::parsing::LexerOptions lex_options;
+  lex_options.languageVersion = slang::LanguageVersion::v1800_2023;
+  slang::parsing::ParserOptions parse_options;
+  parse_options.languageVersion = slang::LanguageVersion::v1800_2023;
   slang::Bag bag;
   bag.set(pp_options);
+  bag.set(lex_options);
+  bag.set(parse_options);
 
   // In all-branches mode, conditional directives are replaced by spaces (same
   // length, so offsets are unchanged) and every branch is parsed; the
@@ -1511,9 +1550,14 @@ absl::StatusOr<std::unique_ptr<SlangAnalyzer>> SlangAnalyzer::AnalyzeWithMode(
   if (!diagnostics.empty()) {
     analyzer->diagnostics_ = slang::DiagnosticEngine::reportAll(sm, diagnostics);
   }
+  // Checks that leave the parse tree intact (Verible accepts them).
+  auto is_error = [](const slang::Diagnostic &diag) {
+    return diag.isError() && diag.code != slang::diag::EndNameMismatch &&
+           diag.code != slang::diag::DeclModifierOrdering;
+  };
   bool has_errors = false;
   for (const auto &diag : diagnostics) {
-    if (diag.isError()) has_errors = true;
+    if (is_error(diag)) has_errors = true;
   }
   if (has_errors) {
     // Unknown macros alone are fine: slang skips their arguments and expands
@@ -1523,7 +1567,7 @@ absl::StatusOr<std::unique_ptr<SlangAnalyzer>> SlangAnalyzer::AnalyzeWithMode(
     std::vector<size_t> unknown_macros;
     bool other_errors = false;
     for (const auto &diag : diagnostics) {
-      if (!diag.isError()) continue;
+      if (!is_error(diag)) continue;
       if (diag.code == slang::diag::CouldNotOpenIncludeFile) continue;
       if (diag.code == slang::diag::UnknownDirective &&
           diag.location.buffer() == buffer.id) {

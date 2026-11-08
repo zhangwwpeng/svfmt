@@ -58,7 +58,7 @@ kept only for reference. Results fall into these buckets:
 `--out DIR` writes every non-matching case to a file, and
 `tools/show_cases.py` prints them.
 
-Current result (oracle v0.0-4298): 1994 same, 0 crash.
+Current result (oracle v0.0-4298): 2000 same, 0 crash.
 
 ## Built-in safety checks
 
