@@ -3,8 +3,12 @@
 State at commit time; read this first when resuming.
 
 ## Results
-- Verible test corpus: 2064/2111 identical to verible-verilog-format
-  v0.0-4298-g085eef05 (15 diff, 32 rejected, 0 crash).
+- No longer compared with Verible (2026-11-08). The verible_diff and
+  verible_cases tests and their inputs are removed. Macro arguments are kept
+  verbatim (not formatted). The last Verible comparison was 2064/2111; the
+  review list of its differences is reports/remaining-verible-diffs.md
+  (untracked). Testing is safety only: the corpus test (run_corpus.py
+  --no-parity) and format_inputs.
 - Local real-code corpus (206 files from ~/workspace/verilog-ethernet,
   solouvm, tree-sitter-systemverilog): 0 safety failures, 183/204 identical
   to Verible.

@@ -8,8 +8,6 @@ body-level parameter alignment.
 | Test | What it checks |
 | --- | --- |
 | `format_inputs` | Every `tests/inputs/*.sv` formats with `--failsafe_success=false --verify_convergence`. That covers parsing, the lossless bridge, re-parse, lexical equivalence and idempotence. |
-| `verible_diff` | Every `tests/diff/*.sv` formats byte-identical to `verible-verilog-format`. Skipped if Verible is not installed. |
-| `verible_cases` | About 2100 inputs extracted from Verible's formatter tests (`tests/verible_cases.jsonl`). Fails if fewer than `--min-same` outputs match Verible. |
 | `corpus` | Only if `-DSVFMT_CORPUS_DIR=<dir>` is set. See below. |
 
 ## Corpus test (real code)

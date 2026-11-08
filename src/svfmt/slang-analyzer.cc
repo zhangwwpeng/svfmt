@@ -631,114 +631,11 @@ class SlangAnalyzer::Builder {
     }
   }
 
-  // Like Verible's macro argument expansion: if a macro argument parses as an
-  // expression on its own, convert it into an expression subtree (so it is
-  // formatted); otherwise the caller keeps it as one MacroArg token.
+  // Macro arguments are never formatted: the text between the commas is kept
+  // verbatim as one token (whitespace inside a macro call is part of the
+  // macro's text).
   void ConvertMacroArg(std::span<const Token> toks, SyntaxTreeNode &list) {
-    if (ConvertMacroArgExpression(toks, list)) return;
-    if (ConvertNestedMacroCall(toks, list)) return;
     EmitMerged(toks, MacroArg, list, /*verbatim=*/false);
-  }
-
-  // A macro argument that is itself a macro call ("`B(x, `C(y))", as Verible
-  // lexes it): a MacroUsage subtree whose arguments are converted in turn.
-  bool ConvertNestedMacroCall(std::span<const Token> toks, SyntaxTreeNode &list) {
-    using slang::parsing::TokenKind;
-    if (toks.size() < 3 || base_offset_ != 0) return false;
-    if (toks[0].kind != TokenKind::Directive ||
-        toks[0].directiveKind() != slang::syntax::SyntaxKind::MacroUsage ||
-        toks[1].kind != TokenKind::OpenParenthesis ||
-        toks.back().kind != TokenKind::CloseParenthesis) {
-      return false;
-    }
-    // Verible lexes "`B (x)" as a call too, but not across a comment.
-    for (const auto &trivia : toks[1].trivia()) {
-      if (trivia.kind != slang::parsing::TriviaKind::Whitespace) return false;
-    }
-    for (const auto &t : toks) {
-      if (t.location().buffer() != buffer_) return false;
-    }
-    // Top-level commas; the first '(' must close at the last token.
-    std::vector<size_t> commas;
-    int depth = 0;
-    for (size_t i = 1; i < toks.size(); ++i) {
-      switch (toks[i].kind) {
-        case TokenKind::OpenParenthesis:
-        case TokenKind::OpenBracket:
-        case TokenKind::OpenBrace:
-        case TokenKind::ApostropheOpenBrace:
-          ++depth;
-          break;
-        case TokenKind::CloseParenthesis:
-        case TokenKind::CloseBracket:
-        case TokenKind::CloseBrace:
-          if (--depth == 0 && i + 1 != toks.size()) return false;
-          break;
-        case TokenKind::Comma:
-          if (depth == 1) commas.push_back(i);
-          break;
-        default:
-          break;
-      }
-    }
-    if (depth != 0) return false;
-    auto call = std::make_unique<SyntaxTreeNode>(static_cast<int>(slang::syntax::SyntaxKind::MacroUsage));
-    EmitDirectiveToken(toks[0], MacroCallId, *call);
-    Group(GroupKind::kParenGroup, *call, [&](SyntaxTreeNode &paren) {
-      EmitDirectiveToken(toks[1], '(', paren);
-      Group(GroupKind::kMacroArgList, paren, [&](SyntaxTreeNode &args) {
-        size_t begin = 2;
-        commas.push_back(toks.size() - 1);
-        for (size_t comma : commas) {
-          if (comma > begin) ConvertMacroArg(toks.subspan(begin, comma - begin), args);
-          if (comma + 1 != toks.size()) EmitDirectiveToken(toks[comma], ',', args);
-          begin = comma + 1;
-        }
-      });
-      EmitDirectiveToken(toks.back(), ')', paren);
-    });
-    list.AppendChild(std::move(call));
-    return true;
-  }
-
-  bool ConvertMacroArgExpression(std::span<const Token> toks, SyntaxTreeNode &list) {
-    if (toks.empty() || base_offset_ != 0) return false;
-    const Token &first = toks[0];
-    const Token &last = toks[toks.size() - 1];
-    if (first.location().buffer() != buffer_ || last.location().buffer() != buffer_) return false;
-    const size_t begin = first.location().offset();
-    const size_t end = last.location().offset() + last.rawText().size();
-    if (end <= begin) return false;
-    std::string_view text = contents_.substr(begin, end - begin);
-    if (text.find('`') != std::string_view::npos) return false;  // nested macros
-
-    auto &sm = *analyzer_.source_manager_;
-    auto alloc = std::make_unique<slang::BumpAllocator>();
-    slang::Diagnostics diags;
-    slang::SourceBuffer buffer = sm.assignText(text);
-    slang::parsing::Preprocessor pp(sm, *alloc, diags);
-    pp.pushSource(buffer);
-    slang::parsing::Parser parser(pp);
-    const SyntaxNode &expr = parser.parseExpression();
-    if (!diags.empty() || !parser.isDone()) {
-      return false;
-    }
-
-    EmitTrivia(first, list);
-    if (TokenAtCursor(first).empty()) return false;
-    const slang::BufferID saved_buffer = buffer_;
-    buffer_ = buffer.id;
-    base_offset_ = begin;
-    parent_first_.push_back(Token());
-    Child(&expr, list);
-    parent_first_.pop_back();
-    buffer_ = saved_buffer;
-    base_offset_ = 0;
-    analyzer_.macro_arg_allocs_.push_back(std::move(alloc));
-    if (static_cast<size_t>(Offset(cursor_)) != end && status_.ok()) {
-      status_ = absl::InternalError("svfmt: could not convert macro argument");
-    }
-    return true;
   }
 
   // slang has separate '.' and '*' tokens; Verible lexes ".*" as one.

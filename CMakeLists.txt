@@ -59,27 +59,15 @@ if(SVFMT_BUILD_TESTS)
   add_test(NAME format_inputs
            COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_format_inputs.sh $<TARGET_FILE:svfmt>
                    ${CMAKE_CURRENT_SOURCE_DIR}/tests/inputs)
-  add_test(NAME verible_diff
-           COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_diff.sh $<TARGET_FILE:svfmt>
-                   ${CMAKE_CURRENT_SOURCE_DIR}/tests/diff)
-  set_tests_properties(verible_diff PROPERTIES ENVIRONMENT "VERIBLE_FORMAT=${SVFMT_VERIBLE_FORMAT}")
 endif()
 
 if(SVFMT_BUILD_TESTS)
-  # Differential run on ~2100 inputs extracted from Verible's formatter tests.
-  # Fails if the number of outputs identical to verible-verilog-format drops.
+  # Corpus safety test (no comparison with Verible).
   find_package(Python3 COMPONENTS Interpreter)
-  if(Python3_FOUND)
-    add_test(NAME verible_cases
-             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_verible_cases.py
-                     $<TARGET_FILE:svfmt> ${CMAKE_CURRENT_SOURCE_DIR}/tests/verible_cases.jsonl
-                     --min-same 1660)
-    set_tests_properties(verible_cases PROPERTIES ENVIRONMENT "VERIBLE_FORMAT=${SVFMT_VERIBLE_FORMAT}")
-    if(SVFMT_CORPUS_DIR)
-      add_test(NAME corpus
-               COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_corpus.py
-                       ${CMAKE_BINARY_DIR} ${SVFMT_CORPUS_DIR} --verible ${SVFMT_VERIBLE_FORMAT}
-                       --out ${CMAKE_BINARY_DIR}/corpus_report)
-    endif()
+  if(Python3_FOUND AND SVFMT_CORPUS_DIR)
+    add_test(NAME corpus
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_corpus.py
+                     ${CMAKE_BINARY_DIR} ${SVFMT_CORPUS_DIR} --no-parity
+                     --out ${CMAKE_BINARY_DIR}/corpus_report)
   endif()
 endif()
