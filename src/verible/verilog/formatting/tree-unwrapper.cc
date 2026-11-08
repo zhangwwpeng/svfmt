@@ -1226,6 +1226,7 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
     case SyntaxKind::OrderedPortConnection:
     case SyntaxKind::WildcardPortConnection:
     case SyntaxKind::MacroFormalArgument:
+    case SyntaxKind::FunctionPort:  // kPortItem
     case SyntaxKind::PropertyDeclaration:
     case SyntaxKind::SequenceDeclaration:
     case SyntaxKind::ImplicitAnsiPort:
@@ -1273,6 +1274,17 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
       const int parent = DirectParentTag(Context());
       if (parent == Tag(ListKind::DataDeclaration_declarators) ||
           parent == Tag(ListKind::EnumType_members)) {
+        VisitIndentedSection(node, 0, PartitionPolicyEnum::kFitOnLineElseExpand);
+      } else {
+        TraverseChildren(node);
+      }
+      break;
+    }
+
+    // kFunctionPrototype / kTaskPrototype of a DPI import (other prototypes
+    // are kSubroutineHeader groups).
+    case SyntaxKind::FunctionPrototype: {
+      if (DirectParentTag(Context()) == static_cast<int>(SyntaxKind::DPIImport)) {
         VisitIndentedSection(node, 0, PartitionPolicyEnum::kFitOnLineElseExpand);
       } else {
         TraverseChildren(node);
@@ -2739,6 +2751,11 @@ void TreeUnwrapper::ReshapeTokenPartitions(
       case ListKind::FunctionPortList_ports:
         // Verible: kParenGroup.
         SetCommentLinePartitionAsAlreadyFormatted(&partition);
+        // A comment line before the first port lands inside that port's
+        // partition (Verible: a sibling of the kPortItem).
+        for (auto &child : partition.Children()) {
+          if (!is_leaf(child)) SetCommentLinePartitionAsAlreadyFormatted(&child);
+        }
         AttachSeparatorsToListElementPartitions(&partition);
         break;
       case ListKind::UdpBody_portDecls:
