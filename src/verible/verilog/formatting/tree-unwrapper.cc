@@ -976,7 +976,12 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
       // kPortActualList (named and positional ports of an instance)
       case ListKind::HierarchicalInstance_connections: {
         const int indent = suppress_indentation ? 0 : style_.NamedPortIndentation();
-        VisitIndentedSection(node, indent, PartitionPolicyEnum::kTabularAlignment);
+        // Ports of a gate are not aligned (Verible: not inside a
+        // kDataDeclaration).
+        const bool gate = AncestorKind(Context(), 1) == SyntaxKind::PrimitiveInstantiation;
+        VisitIndentedSection(node, indent,
+                             gate ? PartitionPolicyEnum::kFitOnLineElseExpand
+                                  : PartitionPolicyEnum::kTabularAlignment);
         return;
       }
 
@@ -1032,9 +1037,11 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
 
       // kGateInstanceRegisterVariableList, kVariableDeclarationAssignmentList,
       // kMacroFormalParameterList, modport port lists
+      // Verible's kPrimitiveGateInstanceList gets no partition of its own.
+      case ListKind::PrimitiveInstantiation_instances:
+        break;
       case ListKind::DataDeclaration_declarators:
       case ListKind::HierarchyInstantiation_instances:
-      case ListKind::PrimitiveInstantiation_instances:
       case ListKind::MacroFormalArgumentList_args: {
         const int indent = suppress_indentation ? 0 : style_.wrap_spaces;
         VisitIndentedSection(node, indent, PartitionPolicyEnum::kFitOnLineElseExpand);
@@ -1251,7 +1258,6 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
     case SyntaxKind::DefaultCaseItem:
     case SyntaxKind::PatternCaseItem:
     case SyntaxKind::RandCaseItem:
-    case SyntaxKind::HierarchicalInstance:
     case SyntaxKind::ElseClause:
     case SyntaxKind::ClassPropertyDeclaration:
     case SyntaxKind::ClassMethodPrototype:
@@ -1268,6 +1274,15 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
         VisitIndentedSection(node, 0, PartitionPolicyEnum::kFitOnLineElseExpand);
       } else {
         TraverseChildren(node);
+      }
+      break;
+    }
+    // Verible's kPrimitiveGateInstance gets no partition of its own.
+    case SyntaxKind::HierarchicalInstance: {
+      if (AncestorKind(Context()) == SyntaxKind::PrimitiveInstantiation) {
+        TraverseChildren(node);
+      } else {
+        VisitIndentedSection(node, 0, PartitionPolicyEnum::kFitOnLineElseExpand);
       }
       break;
     }
@@ -1434,10 +1449,17 @@ void TreeUnwrapper::SetIndentationsForOtherKinds(const SyntaxTreeNode &node,
       // A task call module item (only from a reshaped module-body excerpt).
       const bool is_module_item =
           DirectParentTag(Context()) == Tag(ListKind::ModuleDeclaration_members);
-      if ((is_statement || is_module_item) && IsSystemCall(node)) {
+      // Verible's is_standalone_call: the statement sits directly in a
+      // statement list (not the body of "#10 ...", "if (...) ...").
+      bool in_statement_list = false;
+      if (is_statement && Context().size() >= 2) {
+        in_statement_list = IsBlockItemList((*std::next(Context().rbegin()))->Tag().tag);
+      }
+      const bool is_system_call = IsSystemCall(node);
+      if ((in_statement_list || is_module_item) && is_system_call) {
         PushContextHint(ContextHint::kInsideStandaloneMacroCall);
         VisitIndentedSection(node, 0, PartitionPolicyEnum::kStack);
-      } else if (is_statement) {
+      } else if (is_statement && !is_system_call) {
         VisitIndentedSection(node, 0, PartitionPolicyEnum::kAppendFittingSubPartitions);
       } else {
         TraverseChildren(node);
