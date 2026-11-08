@@ -1622,7 +1622,10 @@ absl::StatusOr<std::unique_ptr<SlangAnalyzer>> SlangAnalyzer::Analyze(
     if (!r.ok()) {
       // An empty include supplies items; a port needs a ',' after it, or
       // none if it is the last port: try the forms in turn.
-      for (const char *content : {"input __svfmt_include__,", "input __svfmt_include__"}) {
+      // Ports and parameters: an empty include in a list leaves a stray ','.
+      for (const char *content :
+           {"input __svfmt_include__,", "input __svfmt_include__",
+            "parameter __svfmt_include__ = 0", "parameter __svfmt_include__ = 0,"}) {
         AnalyzerOptions with = base;
         with.placeholder_includes = IncludePlaceholders(text, filename, content);
         auto retry = AnalyzeWithMode(text, filename, with, m, /*all_branches=*/true);
@@ -1760,6 +1763,24 @@ absl::StatusOr<std::unique_ptr<SlangAnalyzer>> SlangAnalyzer::AnalyzeWithMode(
           stubbed.stubbed_macros = std::move(alt);
           auto retry2 = AnalyzeWithMode(text, filename, stubbed, mode, all_branches);
           if (retry2.ok()) return retry2;
+        }
+        // A loop body must be a statement: a stub ";" (or nothing) fails in
+        // "foreach (x) M(...);", while "begin end" parses (the expansion never
+        // reaches the output, only the macro call text does).
+        if (!retry.ok()) {
+          std::vector<std::string> blocks = stubs;
+          for (auto &def : blocks) {
+            if (def.size() >= 2 && def.compare(def.size() - 2, 2, " ;") == 0) {
+              def.replace(def.size() - 2, 2, " begin end");
+            } else if (def.back() == ')') {
+              def += " begin end";  // an argument list with an empty body
+            }
+          }
+          if (blocks != stubs) {
+            stubbed.stubbed_macros = std::move(blocks);
+            auto retry3 = AnalyzeWithMode(text, filename, stubbed, mode, all_branches);
+            if (retry3.ok()) return retry3;
+          }
         }
       }
       if (retry.ok() || other_errors) return retry;
