@@ -637,7 +637,35 @@ class SlangAnalyzer::Builder {
   void ConvertMacroArg(std::span<const Token> toks, SyntaxTreeNode &list) {
     if (ConvertMacroArgExpression(toks, list)) return;
     if (ConvertNestedMacroCall(toks, list)) return;
+    if (ConvertMacroArgTokens(toks, list)) return;
     EmitMerged(toks, MacroArg, list, /*verbatim=*/false);
+  }
+
+  // A macro argument made of plain tokens that start with a macro reference
+  // ("`PATH / src / file.sv"): each token is a leaf, so the formatter spaces
+  // them as it would any other tokens. Brackets, parentheses and strings are
+  // left to the verbatim MacroArg token.
+  bool ConvertMacroArgTokens(std::span<const Token> toks, SyntaxTreeNode &list) {
+    using slang::parsing::TokenKind;
+    if (toks.empty() || base_offset_ != 0 || toks[0].kind != TokenKind::Directive) return false;
+    for (const auto &t : toks) {
+      if (t.location().buffer() != buffer_) return false;
+      switch (t.kind) {
+        case TokenKind::OpenParenthesis:
+        case TokenKind::CloseParenthesis:
+        case TokenKind::OpenBracket:
+        case TokenKind::CloseBracket:
+        case TokenKind::OpenBrace:
+        case TokenKind::CloseBrace:
+        case TokenKind::ApostropheOpenBrace:
+        case TokenKind::StringLiteral:
+          return false;
+        default:
+          break;
+      }
+    }
+    for (const auto &t : toks) Tok(t, list);
+    return true;
   }
 
   // A macro argument that is itself a macro call ("`B(x, `C(y))", as Verible

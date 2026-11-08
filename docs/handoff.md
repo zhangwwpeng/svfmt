@@ -3,8 +3,8 @@
 State at commit time; read this first when resuming.
 
 ## Results
-- Verible test corpus: 2064/2111 identical to verible-verilog-format
-  v0.0-4298-g085eef05 (15 diff, 32 rejected, 0 crash).
+- Verible test corpus: 2065/2111 identical to verible-verilog-format
+  v0.0-4298-g085eef05 (14 diff, 32 rejected, 0 crash).
 - Local real-code corpus (206 files from ~/workspace/verilog-ethernet,
   solouvm, tree-sitter-systemverilog): 0 safety failures, 183/204 identical
   to Verible.
