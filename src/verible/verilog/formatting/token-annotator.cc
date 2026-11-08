@@ -565,6 +565,14 @@ static WithReason<int> SpacesRequiredBetween(
       AncestorKind(right_context, 1) != SyntaxKind::ExpressionStatement) {
     return {1, "Space before prefix '++'/'--'."};
   }
+  // "repeat (3) ++k;": a statement after a control header.
+  if (left.TokenEnum() == ')' &&
+      (right.TokenEnum() == verilog_tokentype::TK_INCR ||
+       right.TokenEnum() == verilog_tokentype::TK_DECR) &&
+      (DirectParentIs(right_context, SyntaxKind::UnaryPreincrementExpression) ||
+       DirectParentIs(right_context, SyntaxKind::UnaryPredecrementExpression))) {
+    return {1, "Space between ')' and a prefix '++'/'--' statement."};
+  }
   if (right.TokenEnum() == verilog_tokentype::TK_TRIGGER ||
       right.TokenEnum() == verilog_tokentype::TK_NONBLOCKING_TRIGGER) {
     return {1, "Space before event trigger '->'/'->>' statement."};

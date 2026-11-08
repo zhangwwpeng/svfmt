@@ -1088,6 +1088,11 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
       case GroupKind::kClassHeader:
         VisitIndentedSection(node, 0, PartitionPolicyEnum::kAlwaysExpand);
         return;
+      // Verible's kAssertionVariableDeclarationList and kPropertySpec /
+      // kSequenceDeclarationFinalExpr: one level in, one item per line.
+      case GroupKind::kAssertionDeclBody:
+        VisitIndentedSection(node, style_.indentation_spaces, PartitionPolicyEnum::kAlwaysExpand);
+        return;
       case GroupKind::kSubroutineHeader:
         if (svfmt::IsInsideAnyOf(Context(),
                                  {SyntaxKind::DPIImport, SyntaxKind::DPIExport})) {
@@ -2913,6 +2918,15 @@ void TreeUnwrapper::ReshapeTokenPartitions(
 
       case SyntaxKind::ConditionalStatement:
       case SyntaxKind::IfGenerate:
+      case SyntaxKind::ImmediateAssertStatement:
+      case SyntaxKind::ImmediateAssumeStatement:
+      case SyntaxKind::ImmediateCoverStatement:
+      case SyntaxKind::AssertPropertyStatement:
+      case SyntaxKind::AssumePropertyStatement:
+      case SyntaxKind::CoverPropertyStatement:
+      case SyntaxKind::CoverSequenceStatement:
+      case SyntaxKind::ExpectPropertyStatement:
+      case SyntaxKind::RestrictPropertyStatement:
         ReshapeConditionalConstruct(node, &partition, style_);
         break;
 

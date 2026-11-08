@@ -736,6 +736,99 @@ class SlangAnalyzer::Builder {
         Child(n.elseClause, out);
         return true;
       }
+      // Verible's kAssertionClause, kAssertPropertyClause, kWaitStatement...:
+      // grouped like an if clause, with the action's else clause after it.
+      case SyntaxKind::ImmediateAssertStatement:
+      case SyntaxKind::ImmediateAssumeStatement:
+      case SyntaxKind::ImmediateCoverStatement: {
+        const auto &n = node.as<ImmediateAssertionStatementSyntax>();
+        Child(n.label, out);
+        List(n.attributes, static_cast<int>(ListKind::ImmediateAssertionStatement_attributes),
+             out);
+        Group(GroupKind::kIfClause, out, [&](SyntaxTreeNode &clause) {
+          Group(GroupKind::kIfHeader, clause, [&](SyntaxTreeNode &g) {
+            Tok(n.keyword, g);
+            Child(n.delay, g);
+            Child(n.expr.get(), g);
+          });
+          Group(GroupKind::kIfBody, clause,
+                [&](SyntaxTreeNode &g) { Child(n.action->statement, g); });
+        });
+        Child(n.action->elseClause, out);
+        return true;
+      }
+      case SyntaxKind::AssertPropertyStatement:
+      case SyntaxKind::AssumePropertyStatement:
+      case SyntaxKind::CoverPropertyStatement:
+      case SyntaxKind::CoverSequenceStatement:
+      case SyntaxKind::ExpectPropertyStatement:
+      case SyntaxKind::RestrictPropertyStatement: {
+        const auto &n = node.as<ConcurrentAssertionStatementSyntax>();
+        Child(n.label, out);
+        List(n.attributes, static_cast<int>(ListKind::ConcurrentAssertionStatement_attributes),
+             out);
+        Group(GroupKind::kIfClause, out, [&](SyntaxTreeNode &clause) {
+          Group(GroupKind::kIfHeader, clause, [&](SyntaxTreeNode &g) {
+            Tok(n.keyword, g);
+            Tok(n.propertyOrSequence, g);
+            Tok(n.openParen, g);
+            Child(n.propertySpec.get(), g);
+            Tok(n.closeParen, g);
+          });
+          Group(GroupKind::kIfBody, clause,
+                [&](SyntaxTreeNode &g) { Child(n.action->statement, g); });
+        });
+        Child(n.action->elseClause, out);
+        return true;
+      }
+      case SyntaxKind::PropertyDeclaration: {
+        const auto &n = node.as<PropertyDeclarationSyntax>();
+        List(n.attributes, static_cast<int>(ListKind::PropertyDeclaration_attributes), out);
+        Tok(n.keyword, out);
+        Tok(n.name, out);
+        Child(n.portList, out);
+        Tok(n.semi, out);
+        Group(GroupKind::kAssertionDeclBody, out, [&](SyntaxTreeNode &g) {
+          List(n.variables, static_cast<int>(ListKind::PropertyDeclaration_variables), g);
+          Child(n.propertySpec.get(), g);
+          Tok(n.optionalSemi, g);
+        });
+        Tok(n.end, out);
+        Child(n.endBlockName, out);
+        return true;
+      }
+      case SyntaxKind::SequenceDeclaration: {
+        const auto &n = node.as<SequenceDeclarationSyntax>();
+        List(n.attributes, static_cast<int>(ListKind::SequenceDeclaration_attributes), out);
+        Tok(n.keyword, out);
+        Tok(n.name, out);
+        Child(n.portList, out);
+        Tok(n.semi, out);
+        Group(GroupKind::kAssertionDeclBody, out, [&](SyntaxTreeNode &g) {
+          List(n.variables, static_cast<int>(ListKind::SequenceDeclaration_variables), g);
+          Child(n.seqExpr.get(), g);
+          Tok(n.optionalSemi, g);
+        });
+        Tok(n.end, out);
+        Child(n.endBlockName, out);
+        return true;
+      }
+      case SyntaxKind::WaitStatement: {
+        const auto &n = node.as<WaitStatementSyntax>();
+        Child(n.label, out);
+        List(n.attributes, static_cast<int>(ListKind::WaitStatement_attributes), out);
+        Group(GroupKind::kIfClause, out, [&](SyntaxTreeNode &clause) {
+          Group(GroupKind::kIfHeader, clause, [&](SyntaxTreeNode &g) {
+            Tok(n.wait, g);
+            Tok(n.openParen, g);
+            Child(n.expr.get(), g);
+            Tok(n.closeParen, g);
+          });
+          Group(GroupKind::kIfBody, clause,
+                [&](SyntaxTreeNode &g) { Child(n.statement.get(), g); });
+        });
+        return true;
+      }
       case SyntaxKind::ElseClause: {
         const auto &n = node.as<ElseClauseSyntax>();
         Tok(n.elseKeyword, out);
