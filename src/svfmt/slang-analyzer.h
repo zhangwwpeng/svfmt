@@ -62,6 +62,9 @@ struct AnalyzerOptions {
   // Set internally: stub `define lines generated for unknown macros, parsed
   // from a buffer ahead of the main one.
   std::vector<std::string> stubbed_macros;
+  // Set internally: (absolute path, text) of `include files that are not on
+  // disk, so they parse as a placeholder instead of failing.
+  std::vector<std::pair<std::string, std::string>> placeholder_includes;
 };
 
 class SlangAnalyzer {

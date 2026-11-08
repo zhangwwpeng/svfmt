@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <filesystem>
 #include <map>
 #include <memory>
 #include <optional>
@@ -1631,6 +1632,44 @@ std::vector<std::string> StubDefinitions(std::string_view text,
 
 }  // namespace
 
+namespace {
+
+// `include "name" files that exist neither next to `filename` nor in an
+// include directory. Returns (absolute path where the file would be read from
+// for the local lookup, text) pairs with `content` as the text.
+std::vector<std::pair<std::string, std::string>> MissingIncludePlaceholders(
+    std::string_view text, std::string_view filename, const AnalyzerOptions &options,
+    std::string_view content) {
+  namespace fs = std::filesystem;
+  std::vector<std::pair<std::string, std::string>> out;
+  const fs::path dir = fs::path(filename).parent_path();
+  std::error_code ec;
+  for (size_t pos = text.find("`include"); pos != std::string_view::npos;
+       pos = text.find("`include", pos)) {
+    size_t p = pos + 8;
+    pos = p;
+    while (p < text.size() && (text[p] == ' ' || text[p] == '\t')) ++p;
+    if (p >= text.size() || text[p] != '"') continue;
+    const size_t close = text.find('"', p + 1);
+    if (close == std::string_view::npos) continue;
+    const std::string_view name_text = text.substr(p + 1, close - p - 1);
+    if (name_text.empty() || name_text.find('\n') != std::string_view::npos) continue;
+    const std::string name(name_text);
+    bool found = fs::exists(dir / name, ec);
+    for (const auto &d : options.include_dirs) {
+      found = found || fs::exists(fs::path(d) / name, ec);
+    }
+    if (found) continue;
+    fs::path local = dir / name;
+    std::error_code canon_ec;
+    fs::path canonical = fs::weakly_canonical(local, canon_ec);
+    out.emplace_back(canon_ec ? local.string() : canonical.string(), std::string(content));
+  }
+  return out;
+}
+
+}  // namespace
+
 absl::StatusOr<std::unique_ptr<SlangAnalyzer>> SlangAnalyzer::Analyze(
     std::string_view text, std::string_view filename, const AnalyzerOptions &options) {
   const ParseMode *mode = FindParseMode(ScanParseModeDirective(text));
@@ -1641,6 +1680,18 @@ absl::StatusOr<std::unique_ptr<SlangAnalyzer>> SlangAnalyzer::Analyze(
     auto r = AnalyzeWithMode(text, filename, options, m, /*all_branches=*/true);
     if (!r.ok() && has_conditionals) {
       r = AnalyzeWithMode(text, filename, options, m, /*all_branches=*/false);
+    }
+    if (!r.ok()) {
+      // A missing `include may supply items (no placeholder needed), a port
+      // (followed by ',') or the last port (no ','): try the forms in turn.
+      for (const char *content : {"input __svfmt_include__,", "input __svfmt_include__"}) {
+        auto placeholders = MissingIncludePlaceholders(text, filename, options, content);
+        if (placeholders.empty()) break;
+        AnalyzerOptions with = options;
+        with.placeholder_includes = std::move(placeholders);
+        auto retry = AnalyzeWithMode(text, filename, with, m, /*all_branches=*/true);
+        if (retry.ok()) return retry;
+      }
     }
     return r;
   };
@@ -1697,6 +1748,9 @@ absl::StatusOr<std::unique_ptr<SlangAnalyzer>> SlangAnalyzer::AnalyzeWithMode(
     for (const auto &d : directives) {
       std::fill(parse_text.begin() + d.begin, parse_text.begin() + d.end, ' ');
     }
+  }
+  for (const auto &[path, content] : options.placeholder_includes) {
+    sm.assignText(path, content);
   }
   slang::SourceBuffer buffer = sm.assignText(filename, parse_text);
   if (mode != nullptr || !options.stubbed_macros.empty()) {
