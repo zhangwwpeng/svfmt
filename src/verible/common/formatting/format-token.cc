@@ -15,6 +15,7 @@
 #include "verible/common/formatting/format-token.h"
 
 #include <algorithm>
+#include <iterator>
 #include <cstddef>
 #include <iostream>
 #include <sstream>  // pragma IWYU: keep  // for ostringstream
@@ -283,7 +284,13 @@ void PreserveSpacesOnDisabledTokenRanges(
     // whitespaces *beyond* that point up to the start of the following
     // token's text.  This way, rendering the start of the format-disabled
     // excerpt won't get redundant '\n's.
-    if (!disable_range.empty()) {
+    // svfmt: only after a //-comment; after any other token (e.g. "`endif")
+    // that '\n' is not printed by anyone else, and the next token would be
+    // joined onto the previous line.
+    const bool after_eol_comment =
+        !disable_range.empty() && disable_range.begin() != ftokens->begin() &&
+        std::prev(disable_range.begin())->token->text().substr(0, 2) == "//";
+    if (after_eol_comment) {
       auto &first = disable_range.front();
       VLOG(3) << "checking whether first ftoken in range is a must-wrap.";
       if (first.before.break_decision == SpacingOptions::kMustWrap) {

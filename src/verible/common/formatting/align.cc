@@ -23,6 +23,7 @@
 #include <limits>
 #include <map>
 #include <numeric>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -851,6 +852,31 @@ struct AlignablePartitionGroup::GroupAlignmentData {
   // If this is empty, don't do any alignment.
   std::vector<std::vector<DeferredTokenAlignment>> align_actions_2D;
 
+  // svfmt: true if the original spacing already equals the aligned spacing.
+  // Within a line the spaces must match; at a row start (after a newline) the
+  // column minus the alignment padding must be the same for all rows (one
+  // common indentation). Formatting aligned code must keep it aligned, or the
+  // next pass may infer another policy (no convergence).
+  bool OriginalIsAligned() const {
+    bool any = false;
+    std::optional<int> row_base;
+    for (const auto &align_actions : align_actions_2D) {
+      for (const auto &action : align_actions) {
+        const std::string_view leading = action.ftoken->OriginalLeadingSpaces();
+        const size_t newline = leading.find_last_of('\n');
+        if (newline != std::string_view::npos) {
+          const int base = static_cast<int>(leading.size() - newline - 1) - action.new_before_spacing;
+          if (row_base && *row_base != base) return false;
+          row_base = base;
+          continue;
+        }
+        if (static_cast<int>(leading.size()) != action.new_before_spacing) return false;
+        any = true;
+      }
+    }
+    return any;
+  }
+
   int MaxAbsoluteAlignVsFlushLeftSpacingDifference() const {
     int result = std::numeric_limits<int>::min();
     for (const auto &align_actions : align_actions_2D) {
@@ -1109,6 +1135,11 @@ AlignmentPolicy
 AlignablePartitionGroup::GroupAlignmentData::InferUserIntendedAlignmentPolicy(
     const TokenPartitionRange &partitions) const {
   // Heuristics are implemented as a sequence of priority-ordered rules.
+
+  if (OriginalIsAligned()) {
+    VLOG(2) << "original spacing is already aligned, so align.";
+    return AlignmentPolicy::kAlign;
+  }
 
   {
     // If the visual distance between aligned and flushed left is sufficiently

@@ -20,6 +20,9 @@ Rejections of files listed in tests/corpus_expected_rejects.txt (invalid on
 purpose, e.g. sv2v error tests) are counted as expected_rejected, not as
 ok_rejected, so the remaining ok_rejected are the rejections to look at.
 
+Rejections because line wrapping hit the search limit are counted as
+ok_search_limit (safe: the input is echoed).
+
 Exit status is non-zero if any safety check fails.
 """
 import argparse
@@ -95,7 +98,13 @@ def check(idx_path):
     elif rc < 0 or b'] Check failed:' in err:
         res['safety'] = 'crash'
     elif rc != 0:
-        res['safety'] = 'ok_rejected' if out == original else 'rejected_but_changed'
+        if out != original:
+            res['safety'] = 'rejected_but_changed'
+        elif b'failed to complete within the search limit' in err:
+            # Line wrapping gave up (--max_search_states); the input is echoed.
+            res['safety'] = 'ok_search_limit'
+        else:
+            res['safety'] = 'ok_rejected'
     else:
         tmp = os.path.join(tmpdir, f'{idx}.sv')
         open(tmp, 'wb').write(out)
@@ -172,7 +181,7 @@ def count(key, val):
 
 print(f'files: {len(results)}')
 print('safety:')
-for k in ['ok_formatted', 'ok_rejected', 'expected_rejected'] + BAD:
+for k in ['ok_formatted', 'ok_rejected', 'expected_rejected', 'ok_search_limit'] + BAD:
     print(f'  {k:22s} {count("safety", k)}')
 if have_verible:
     print('parity with verible (formatted files only):')
@@ -181,7 +190,7 @@ if have_verible:
 
 if args.out:
     os.makedirs(args.out, exist_ok=True)
-    for k in BAD + ['ok_rejected', 'expected_rejected']:
+    for k in BAD + ['ok_rejected', 'expected_rejected', 'ok_search_limit']:
         with open(os.path.join(args.out, f'{k}.txt'), 'w') as f:
             for r in results:
                 if r['safety'] == k:

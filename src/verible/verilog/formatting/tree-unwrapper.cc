@@ -2693,7 +2693,15 @@ static void HandleDataDeclaration(const SyntaxTreeNode &node,
       std::vector<size_t> offsets;
       FlattenOnlyChildrenWithChildren(data_declaration_partition, &offsets);
       const size_t fuse_position = offsets.back() - 1;
-      MergeConsecutiveSiblings(&data_declaration_partition, fuse_position);
+      // svfmt: ") // c" then "bar (": fusing would wrap "bar" after the
+      // comment at the wrap indent, which differs from the layout of the
+      // first pass (comment on its own line): keep them apart.
+      const auto &left = data_declaration_partition.Children()[fuse_position];
+      const auto left_tokens = left.Value().TokensRange();
+      if (left_tokens.empty() ||
+          left_tokens.back().TokenEnum() != verilog_tokentype::TK_EOL_COMMENT) {
+        MergeConsecutiveSiblings(&data_declaration_partition, fuse_position);
+      }
     } else {
       FlattenOnlyChildrenWithChildren(data_declaration_partition);
     }

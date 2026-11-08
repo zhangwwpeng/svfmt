@@ -61,6 +61,7 @@
 #include "verible/verilog/formatting/align.h"
 #include "verible/verilog/formatting/comment-controls.h"
 #include "verible/verilog/formatting/format-style.h"
+#include "verible/verilog/parser/verilog-token-classifications.h"
 #include "verible/verilog/formatting/token-annotator.h"
 #include "verible/verilog/formatting/tree-unwrapper.h"
 #include "verible/verilog/parser/verilog-token-enum.h"
@@ -979,6 +980,14 @@ class ContinuationCommentAligner {
       if (previous_line.Tokens().size() <= 1) {
         VLOG(4) << "Not a continuation comment line: "
                 << "too few tokens in previous line.";
+        return false;
+      }
+      // svfmt: a comment after a directive line ("`else  // c") does not
+      // continue it; otherwise a comment that lands within a column of it
+      // becomes a continuation on the next pass and moves (no convergence).
+      if (IsPreprocessorKeyword(verilog_tokentype(
+              previous_line.Tokens().front().token->token_enum()))) {
+        VLOG(4) << "Not a continuation comment line: previous line is a directive.";
         return false;
       }
       const auto *previous_comment = previous_line.Tokens().back().token;

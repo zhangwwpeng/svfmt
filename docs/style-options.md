@@ -66,7 +66,7 @@ Other options:
 | `--verify` | exit non-zero if the file would change (check mode) |
 | `--verify_convergence` | also check that formatting is idempotent (default: true) |
 | `--failsafe_success` | exit 0 even on errors; the original text is always echoed (default: true) |
-| `--max_search_states` | cap on line-wrap search states |
+| `--max_search_states` | cap on line-wrap search states (default 300000) |
 | `--show_token_partition_tree`, `--show_largest_token_partitions`, `--show_inter_token_info`, `--show_equally_optimal_wrappings` | debug dumps, same format as Verible's where possible |
 
 ## svfmt-only flags

@@ -1434,6 +1434,96 @@ bool InStructBody(std::string_view text, size_t pos) {
   }
 }
 
+// Whether `pos` is inside a constraint block ("constraint c { ... }"),
+// possibly nested in "foreach (...) {" / "if (...) {" braces.
+bool InConstraintBody(std::string_view text, size_t pos) {
+  constexpr size_t kMaxScan = 20000;  // keep the backward scans bounded
+  const size_t floor = pos > kMaxScan ? pos - kMaxScan : 0;
+  int depth = 0;
+  for (size_t i = pos; i-- > floor;) {
+    const char c = text[i];
+    if (c == '}') {
+      ++depth;
+    } else if (c == '{' && depth-- == 0) {
+      // The text of the construct that opens this brace.
+      size_t start = i;
+      while (start > floor && text[start - 1] != ';' && text[start - 1] != '{' &&
+             text[start - 1] != '}') {
+        --start;
+      }
+      const std::string_view head = text.substr(start, i - start);
+      for (size_t at = head.find("constraint"); at != std::string_view::npos;
+           at = head.find("constraint", at + 1)) {
+        const bool left = at == 0 || !IsIdentChar(head[at - 1]);
+        const bool right = at + 10 >= head.size() || !IsIdentChar(head[at + 10]);
+        if (left && right) return true;
+      }
+      depth = 0;  // look further out (foreach / if / implication braces)
+    }
+  }
+  return false;
+}
+
+// End of the code before `pos`: skips whitespace, "// ..." line comments and
+// "/* ... */" block comments (a '/' in "////" is not a division).
+size_t PreviousCodeEnd(std::string_view text, size_t pos) {
+  size_t p = pos;
+  while (true) {
+    while (p > 0 && std::isspace(static_cast<unsigned char>(text[p - 1]))) --p;
+    if (p >= 2 && text[p - 1] == '/' && text[p - 2] == '*') {
+      const size_t open = text.rfind("/*", p - 2);
+      if (open == std::string_view::npos) return p;
+      p = open;
+      continue;
+    }
+    // A "//" on the same line before p makes the rest of that line a comment.
+    size_t line_start = text.rfind('\n', p == 0 ? 0 : p - 1);
+    line_start = line_start == std::string_view::npos ? 0 : line_start + 1;
+    const size_t slashes = text.substr(line_start, p - line_start).find("//");
+    if (slashes == std::string_view::npos) return p;
+    p = line_start + slashes;
+  }
+}
+
+// Start of the code after `pos`: skips whitespace and comments.
+size_t NextCodeStart(std::string_view text, size_t pos) {
+  while (pos < text.size()) {
+    if (std::isspace(static_cast<unsigned char>(text[pos]))) {
+      ++pos;
+    } else if (text.substr(pos, 2) == "//") {
+      pos = text.find('\n', pos);
+      if (pos == std::string_view::npos) return text.size();
+    } else if (text.substr(pos, 2) == "/*") {
+      pos = text.find("*/", pos + 2);
+      if (pos == std::string_view::npos) return text.size();
+      pos += 2;
+    } else {
+      break;
+    }
+  }
+  return pos;
+}
+
+// Whether the code after an argument-less macro ending at `end` declares a
+// name with it as the type: "`T name (", "`T name;", "`T name [", ...
+// Decided from the code, not from line breaks (formatting moves those).
+bool DeclaresName(std::string_view text, size_t end) {
+  size_t p = NextCodeStart(text, end);
+  // "`T [7:0] name;", "`T #(8) name (": a type with dimensions/parameters.
+  if (p < text.size() && (text[p] == '[' || text[p] == '#')) return true;
+  if (p >= text.size() || !(std::isalpha(static_cast<unsigned char>(text[p])) ||
+                            text[p] == '_' || text[p] == '\\')) {
+    return false;
+  }
+  if (text[p] == '\\') {
+    while (p < text.size() && !std::isspace(static_cast<unsigned char>(text[p]))) ++p;
+  } else {
+    while (p < text.size() && IsIdentChar(text[p])) ++p;
+  }
+  p = NextCodeStart(text, p);
+  return p < text.size() && std::strchr("(;,[=#", text[p]) != nullptr;
+}
+
 // Builds stub definitions for macros that slang could not find (typically
 // defined in an `include that is not available). A macro used with
 // arguments in statement/item position expands to nothing, or to an empty
@@ -1454,6 +1544,10 @@ std::vector<std::string> StubDefinitions(std::string_view text,
     bool no_semicolon = false;  // some use is not followed by ';'
     bool literal = false;       // used as the digits of a based literal
     bool member = false;        // used as a struct/union member
+    bool constraint = false;    // used in a constraint block
+    bool not_alone = false;     // some argument-less use shares its line
+    bool operand = false;       // some use is followed by an operator
+    bool size = false;          // used as the size of a based literal
   };
   std::map<std::string, Info> infos;
   for (size_t offset : usage_offsets) {
@@ -1492,10 +1586,38 @@ std::vector<std::string> StubDefinitions(std::string_view text,
       size_t q = call_end;
       while (q < text.size() && std::isspace(static_cast<unsigned char>(text[q]))) ++q;
       if (q >= text.size() || text[q] != ';') info.no_semicolon = true;
+      // "`M(x) < y": an operand of an operator.
+      if (q < text.size() && std::strchr("<>=!+-*/%&|^?.[", text[q]) &&
+          text.substr(q, 2) != "//" && text.substr(q, 2) != "/*") {
+        info.expression = true;
+        info.operand = true;
+      }
     }
-    // Context: the previous non-space character.
-    size_t p = offset;
-    while (p > 0 && std::isspace(static_cast<unsigned char>(text[p - 1]))) --p;
+    // Context: the previous non-space character outside comments.
+    size_t p = PreviousCodeEnd(text, offset);
+    // An argument-less macro that starts an item: after ';', ')', '{', '}'
+    // or a begin/end keyword, and nothing else on its line. Line breaks
+    // alone must not decide it: formatting may move the macro to its own line.
+    if (call_end == end) {
+      bool at_item_start = p == 0 || std::strchr(";){}", text[p - 1]) != nullptr;
+      if (!at_item_start && IsIdentChar(text[p - 1])) {
+        size_t w = p;
+        while (w > 0 && IsIdentChar(text[w - 1])) --w;
+        const std::string_view word = text.substr(w, p - w);
+        // ... or another macro ("`uvm_object_utils_end" then "`uvm_object_new").
+        at_item_start = word == "begin" || word.starts_with("end") ||
+                        (w > 0 && text[w - 1] == '`');
+      }
+      // "`M;" is a statement: an identifier keeps "assert (x) `M; else ...".
+      const size_t next = NextCodeStart(text, end);
+      if (!at_item_start || DeclaresName(text, end) || (next < text.size() && text[next] == ';')) {
+        info.not_alone = true;
+      }
+    }
+    // A whole constraint item ("{ `M(x) ... }"), not part of an expression.
+    if (p > 0 && std::strchr("{;}", text[p - 1]) && InConstraintBody(text, offset)) {
+      info.constraint = true;
+    }
     if (p > 0) {
       const char c = text[p - 1];
       static constexpr std::string_view kExprChars = "=(,[{?+-*/%&|^~!<>#'";
@@ -1505,6 +1627,11 @@ std::vector<std::string> StubDefinitions(std::string_view text,
       // arguments may be a statement ("1: `uvm_info(...)").
       if (c == ':' && (end >= text.size() || text[end] != '(')) info.expression = true;
       if ((c == '{' || c == ';') && InStructBody(text, p - 1)) info.member = true;
+    }
+    // "`W'h0": the size of a based literal must be a number.
+    if (call_end == end && end + 1 < text.size() && text[end] == '\'' &&
+        std::strchr("sShHdDbBoO", text[end + 1])) {
+      info.size = true;
     }
     if (offset >= 2 && p == offset && std::strchr("hHdDbBoO", text[offset - 1]) &&
         (text[offset - 2] == '\'' ||
@@ -1524,8 +1651,11 @@ std::vector<std::string> StubDefinitions(std::string_view text,
       def += ')';
     }
     if (info.member) def += info.no_semicolon ? " int __svfmt_macro__;" : " int __svfmt_macro__";
-    else if (info.literal) def += " 0";
-    else if (info.arity < 0 && !info.expression && items_empty) {}
+    else if (info.literal || info.size) def += info.size ? " 8" : " 0";
+    // A constraint item: a constant expression is a valid one.
+    else if (info.constraint && !info.operand) def += info.no_semicolon ? " 1;" : " 1";
+    // An argument-less macro alone on its line is an item ("`uvm_object_utils_end").
+    else if (info.arity < 0 && !info.expression && (items_empty || !info.not_alone)) {}
     else if (info.arity < 0 || info.expression) def += " __svfmt_macro__";
     else if (info.no_semicolon) def += " ;";
     defs.push_back(std::move(def));
@@ -1731,9 +1861,14 @@ absl::StatusOr<std::unique_ptr<SlangAnalyzer>> SlangAnalyzer::AnalyzeWithMode(
     for (const auto &diag : diagnostics) {
       if (!is_error(diag)) continue;
       if (diag.code == slang::diag::CouldNotOpenIncludeFile) continue;
-      if (diag.code == slang::diag::UnknownDirective &&
-          diag.location.buffer() == buffer.id) {
-        unknown_macros.push_back(diag.location.offset());
+      // An unknown macro used in the body of a macro defined in this file
+      // is reported at the expansion; its text is in the `define body.
+      const slang::SourceLocation original =
+          diag.code == slang::diag::UnknownDirective && sm.isMacroLoc(diag.location)
+              ? sm.getFullyOriginalLoc(diag.location)
+              : diag.location;
+      if (diag.code == slang::diag::UnknownDirective && original.buffer() == buffer.id) {
+        unknown_macros.push_back(original.offset());
       } else {
         other_errors = true;
       }

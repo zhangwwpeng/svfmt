@@ -128,7 +128,7 @@ ABSL_FLAG(bool, show_inter_token_info, false,
 ABSL_FLAG(bool, show_equally_optimal_wrappings, false,
           "If true, print when multiple optimal solutions are found (stderr), "
           "but continue to operate normally.");
-ABSL_FLAG(int, max_search_states, 100000,
+ABSL_FLAG(int, max_search_states, 300000,
           "Limits the number of search states explored during "
           "line wrap optimization.");
 

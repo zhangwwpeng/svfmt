@@ -48,7 +48,7 @@ struct ExecutionControl {
 
   // Limit the size of search space for wrapping lines.
   // If this limit is exceeded, error out with a diagnostic message.
-  int max_search_states = 10000;
+  int max_search_states = 300000;
 
   // If true, and not running in incremental format mode with lines specified,
   // format the formatted output one more time to compare and check for
