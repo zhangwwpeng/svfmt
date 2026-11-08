@@ -1006,10 +1006,18 @@ class ContinuationCommentAligner {
             << comment_column;
 
     if (std::abs(original_column_ - comment_column) > kMaxColumnDifference) {
-      VLOG(4) << "Not a continuation comment line: "
-              << "starting column difference is too big";
-      original_column_ = kInvalidColumn;
-      return false;
+      // svfmt: if the comment would land within a column of the previous
+      // EOL comment, the next pass sees a continuation and moves it; align
+      // it now so that formatting converges.
+      const int previous_column = CalculateEolCommentColumn(previous_line);
+      if (formatted_column_ != kInvalidColumn ||
+          std::abs(uwline.IndentationSpaces() - previous_column) > kMaxColumnDifference) {
+        VLOG(4) << "Not a continuation comment line: "
+                << "starting column difference is too big";
+        original_column_ = kInvalidColumn;
+        return false;
+      }
+      original_column_ = comment_column;
     }
 
     VLOG(4) << "Continuation comment line - finalizing formatting";

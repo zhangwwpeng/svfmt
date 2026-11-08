@@ -1989,6 +1989,16 @@ static void PushEndIntoElsePartition(TokenPartitionTree *partition_ptr) {
     VLOG(4) << "end has EOL comment, skip merge into else";
     return;
   }
+  // svfmt: a comment line between 'end' and 'else' is printed after 'end'
+  // ("end  // c"); attach it there now, as the next pass will see it, so
+  // that 'else' gets the same layout in both passes.
+  if (auto *next = NextLeaf(*end_partition);
+      next != nullptr && PartitionIsAllComments(*next) && PartitionContainsEOLComment(*next)) {
+    VLOG(4) << "comment line between end and else, attach it to end";
+    auto *parent = verible::MergeLeafIntoPreviousLeaf(next);
+    if (parent != nullptr) HoistOnlyChildPartition(parent);
+    return;
+  }
   auto *end_parent = verible::MergeLeafIntoNextLeaf(end_partition);
   // if moving leaf results in any singleton partitions, hoist.
   if (end_parent != nullptr) {

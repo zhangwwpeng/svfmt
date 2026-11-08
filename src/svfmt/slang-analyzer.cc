@@ -1548,6 +1548,7 @@ std::vector<std::string> StubDefinitions(std::string_view text,
     bool not_alone = false;     // some argument-less use shares its line
     bool operand = false;       // some use is followed by an operator
     bool size = false;          // used as the size of a based literal
+    bool assertion = false;     // followed by "property" / "sequence"
   };
   std::map<std::string, Info> infos;
   for (size_t offset : usage_offsets) {
@@ -1628,6 +1629,16 @@ std::vector<std::string> StubDefinitions(std::string_view text,
       if (c == ':' && (end >= text.size() || text[end] != '(')) info.expression = true;
       if ((c == '{' || c == ';') && InStructBody(text, p - 1)) info.member = true;
     }
+    // "`MODE property (...)": the macro is assert / assume / cover.
+    if (call_end == end) {
+      const size_t next = NextCodeStart(text, end);
+      for (std::string_view kw : {"property", "sequence"}) {
+        if (text.substr(next, kw.size()) == kw &&
+            (next + kw.size() >= text.size() || !IsIdentChar(text[next + kw.size()]))) {
+          info.assertion = true;
+        }
+      }
+    }
     // "`W'h0": the size of a based literal must be a number.
     if (call_end == end && end + 1 < text.size() && text[end] == '\'' &&
         std::strchr("sShHdDbBoO", text[end + 1])) {
@@ -1650,7 +1661,8 @@ std::vector<std::string> StubDefinitions(std::string_view text,
       }
       def += ')';
     }
-    if (info.member) def += info.no_semicolon ? " int __svfmt_macro__;" : " int __svfmt_macro__";
+    if (info.assertion) def += " assert";
+    else if (info.member) def += info.no_semicolon ? " int __svfmt_macro__;" : " int __svfmt_macro__";
     else if (info.literal || info.size) def += info.size ? " 8" : " 0";
     // A constraint item: a constant expression is a valid one.
     else if (info.constraint && !info.operand) def += info.no_semicolon ? " 1;" : " 1";

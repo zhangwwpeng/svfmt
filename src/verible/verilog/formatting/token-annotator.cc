@@ -928,6 +928,12 @@ static WithReason<SpacingOptions> BreakDecisionBetween(
             "A `define or `pragma keeps its original line structure."};
   }
 
+  // svfmt: a ',' stays with a macro value ("`W, // c"), as with any other
+  // value; breaking before it moves the separator between passes.
+  if (right.TokenEnum() == ',' && left.TokenEnum() == MacroIdentifier) {
+    return {SpacingOptions::kMustAppend, "Keep ',' with the preceding macro."};
+  }
+
   // svfmt: inactive branch text starts its own line.
   if (right.TokenEnum() == svfmt::TK_SVFMT_DISABLED_TEXT &&
       (svfmt::IsInside(left_context, SyntaxKind::IfDefDirective) ||

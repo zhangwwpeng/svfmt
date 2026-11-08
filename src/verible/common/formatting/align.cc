@@ -859,6 +859,8 @@ struct AlignablePartitionGroup::GroupAlignmentData {
   // next pass may infer another policy (no convergence).
   bool OriginalIsAligned() const {
     bool any = false;
+    bool row_padding = false;  // some row start is padded to align
+    bool same_base = true;     // all row starts have one base indentation
     std::optional<int> row_base;
     for (const auto &align_actions : align_actions_2D) {
       for (const auto &action : align_actions) {
@@ -866,7 +868,8 @@ struct AlignablePartitionGroup::GroupAlignmentData {
         const size_t newline = leading.find_last_of('\n');
         if (newline != std::string_view::npos) {
           const int base = static_cast<int>(leading.size() - newline - 1) - action.new_before_spacing;
-          if (row_base && *row_base != base) return false;
+          if (action.new_before_spacing != 0) row_padding = true;
+          if (row_base && *row_base != base) same_base = false;
           row_base = base;
           continue;
         }
@@ -874,7 +877,9 @@ struct AlignablePartitionGroup::GroupAlignmentData {
         any = true;
       }
     }
-    return any;
+    // Without row padding the row starts are plain indentation (re-done by
+    // the formatter), so they do not decide it.
+    return any && (!row_padding || same_base);
   }
 
   int MaxAbsoluteAlignVsFlushLeftSpacingDifference() const {
