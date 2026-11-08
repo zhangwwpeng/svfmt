@@ -1236,6 +1236,10 @@ constexpr ParseMode kParseModes[] = {
      ListKind::ModuleDeclaration_members},
     {"parse-as-statements", "function void __svfmt_excerpt__();", "\nendfunction\n",
      ListKind::FunctionDeclaration_items},
+    // Internal (no directive can name it): a module body that holds task
+    // calls, parsed as statements and reshaped into module items.
+    {"(module-body-statements)", "function void __svfmt_excerpt__();", "\nendfunction\n",
+     ListKind::FunctionDeclaration_items},
 };
 
 const ParseMode *FindParseMode(std::string_view name) {
@@ -1280,6 +1284,38 @@ std::string_view ScanParseModeDirective(std::string_view text) {
     return rest.substr(0, len);
   }
   return {};
+}
+
+// Turns statements parsed from a module body back into module items, the way
+// Verible's grammar sees them: the list becomes a module member list, and a
+// task call statement "$f(...);" becomes the call with its ';' inside.
+void ReshapeAsModuleItems(SymbolPtr &tree) {
+  auto items = std::make_unique<SyntaxTreeNode>(
+      static_cast<int>(ListKind::ModuleDeclaration_members));
+  for (auto &child : verible::SymbolCastToNode(*tree).mutable_children()) {
+    if (child && child->Tag().tag == static_cast<int>(SyntaxKind::ExpressionStatement)) {
+      auto &statement = verible::SymbolCastToNode(*child);
+      SymbolPtr *call = nullptr;
+      SymbolPtr *semi = nullptr;
+      bool other = false;
+      for (auto &part : statement.mutable_children()) {
+        if (!part) continue;
+        if (part->Tag().tag == static_cast<int>(SyntaxKind::InvocationExpression) && !call) {
+          call = &part;
+        } else if (part->Kind() == verible::SymbolKind::kLeaf && call && !semi) {
+          semi = &part;
+        } else {
+          other = true;
+        }
+      }
+      if (call && semi && !other) {
+        verible::SymbolCastToNode(**call).AppendChild(std::move(*semi));
+        child = std::move(*call);
+      }
+    }
+    items->AppendChild(std::move(child));
+  }
+  tree = std::move(items);
 }
 
 // Finds the first node (pre-order) with the given tag.
@@ -1408,11 +1444,20 @@ absl::StatusOr<std::unique_ptr<SlangAnalyzer>> SlangAnalyzer::Analyze(
     }
     return r;
   };
+  const ParseMode *module_body = &kParseModes[0];
+  const ParseMode *statements = &kParseModes[4];
   auto result = attempt(mode);
   if (!result.ok() && mode == nullptr && absl::IsInvalidArgument(result.status())) {
     // Like Verible's automatic mode: retry module items (e.g. a bare
     // "assign" or "always") as a module body.
-    auto retry = attempt(&kParseModes[0]);
+    auto retry = attempt(module_body);
+    if (retry.ok()) return retry;
+    mode = module_body;
+  }
+  if (!result.ok() && mode == module_body && absl::IsInvalidArgument(result.status())) {
+    // Verible's module items include task calls ("$display(...);"), which
+    // slang only accepts as statements.
+    auto retry = attempt(statements);
     if (retry.ok()) return retry;
   }
   return result;
@@ -1540,6 +1585,7 @@ absl::StatusOr<std::unique_ptr<SlangAnalyzer>> SlangAnalyzer::AnalyzeWithMode(
     } else {
       tree = std::make_unique<SyntaxTreeNode>(static_cast<int>(mode->body));
     }
+    if (mode == &kParseModes[4]) ReshapeAsModuleItems(tree);
   }
 
   // The filtered view holds what a parser would see: no whitespace/comments.

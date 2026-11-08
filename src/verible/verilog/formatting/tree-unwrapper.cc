@@ -1413,7 +1413,10 @@ void TreeUnwrapper::SetIndentationsForOtherKinds(const SyntaxTreeNode &node,
     // kFunctionCall / kSystemTFCall
     case SyntaxKind::InvocationExpression: {
       const bool is_statement = AncestorKind(Context()) == SyntaxKind::ExpressionStatement;
-      if (is_statement && IsSystemCall(node)) {
+      // A task call module item (only from a reshaped module-body excerpt).
+      const bool is_module_item =
+          DirectParentTag(Context()) == Tag(ListKind::ModuleDeclaration_members);
+      if ((is_statement || is_module_item) && IsSystemCall(node)) {
         PushContextHint(ContextHint::kInsideStandaloneMacroCall);
         VisitIndentedSection(node, 0, PartitionPolicyEnum::kStack);
       } else if (is_statement) {

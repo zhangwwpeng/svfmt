@@ -3,8 +3,8 @@
 State at commit time; read this first when resuming.
 
 ## Results
-- Verible test corpus: 1656/2111 identical to verible-verilog-format
-  v0.0-4298-g085eef05 (74 diff, 381 rejected, 0 crash).
+- Verible test corpus: 1994/2111 identical to verible-verilog-format
+  v0.0-4298-g085eef05 (75 diff, 42 rejected, 0 crash).
 - Local real-code corpus (206 files from ~/workspace/verilog-ethernet,
   solouvm, tree-sitter-systemverilog): 0 safety failures, 183/204 identical
   to Verible.
@@ -77,3 +77,9 @@ build/svfmt --dump_cst x.sv; build/svfmt --show_token_partition_tree x.sv
    comment of "end", and the second pass joins "else" with its single
    statement (Verible: same); more `infer` flips on leading-comma lists
    (Verible: same).
+8. Planned (not started): a fragment mode for formatting a snippet that is
+   not a valid file on its own (editor selections, most of 09-lrm-examples).
+   Wrap the text in a few contexts in turn (module body, statement inside
+   `initial begin ... end`, expression), use the first that parses, strip
+   the wrapper after formatting, and lexcmp the fragment. --lines does not
+   cover this: it still needs the whole file to parse (Verible: same).
