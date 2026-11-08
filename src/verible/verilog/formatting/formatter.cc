@@ -15,6 +15,7 @@
 #include "verible/verilog/formatting/formatter.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -219,8 +220,9 @@ static absl::StatusOr<std::unique_ptr<svfmt::SlangAnalyzer>> ParseWithStatus(
 // svfmt: an inactive `ifdef / `else branch is kept verbatim when the branches
 // cannot be parsed together (e.g. a missing ',' that is an error only once
 // both branches are active). Such a branch is formatted on its own, inside a
-// wrapper that parses it, and put back. The formatter then indents its first line.
-// Only whitespace changes; the wrapper is checked like any other input.
+// wrapper that parses it, and put back. Its lines get the indentation of the
+// active code of the same conditional (the alternatives share it). Only
+// whitespace changes; the wrapper is checked like any other input.
 namespace {
 
 std::string_view TrimSpaces(std::string_view s) {
@@ -248,6 +250,100 @@ std::vector<std::string_view> SplitLines(std::string_view s) {
   return lines;
 }
 
+size_t LeadingSpaces(std::string_view s) {
+  size_t n = 0;
+  while (n < s.size() && s[n] == ' ') ++n;
+  return n;
+}
+
+// True if the trimmed line starts with the directive `word` (not a longer name).
+bool StartsWithDirective(std::string_view trimmed, std::string_view word) {
+  if (trimmed.size() < word.size() + 1 || trimmed[0] != '`') return false;
+  if (trimmed.substr(1, word.size()) != word) return false;
+  const char next = trimmed.size() > word.size() + 1 ? trimmed[word.size() + 1] : ' ';
+  return !std::isalnum(static_cast<unsigned char>(next)) && next != '_';
+}
+
+bool IsConditionalOpen(std::string_view t) {
+  return StartsWithDirective(t, "ifdef") || StartsWithDirective(t, "ifndef");
+}
+
+// Whether a line is a directive of any kind (a `define, `include, `else...).
+bool IsAnyDirective(std::string_view t) {
+  static constexpr std::string_view kWords[] = {
+      "ifdef", "ifndef", "elsif", "else", "endif", "define", "undef", "include", "pragma"};
+  for (std::string_view w : kWords) {
+    if (StartsWithDirective(t, w)) return true;
+  }
+  return false;
+}
+
+struct Line {
+  size_t begin;  // byte offset of the line in the text
+  std::string_view text;
+};
+
+std::vector<Line> LinesWithOffsets(std::string_view text) {
+  std::vector<Line> out;
+  size_t offset = 0;
+  for (std::string_view line : SplitLines(text)) {
+    out.push_back({offset, line});
+    offset += line.size() + 1;
+  }
+  return out;
+}
+
+// Indentation of the active code that shares the conditional group of
+// `range`: the first code line of the group outside every disabled branch.
+std::optional<size_t> GroupIndent(const std::vector<Line> &lines, std::pair<size_t, size_t> range,
+                                  const std::vector<std::pair<size_t, size_t>> &disabled) {
+  size_t at = 0;
+  while (at + 1 < lines.size() && lines[at + 1].begin <= range.first) ++at;
+  // The opening directive: walk back over nested groups.
+  size_t opener = lines.size();
+  int depth = 0;
+  for (size_t j = at; j-- > 0;) {
+    const std::string_view t = TrimSpaces(lines[j].text);
+    if (StartsWithDirective(t, "endif")) {
+      ++depth;
+    } else if (IsConditionalOpen(t)) {
+      if (depth == 0) {
+        opener = j;
+        break;
+      }
+      --depth;
+    }
+  }
+  if (opener == lines.size()) return std::nullopt;
+  // The matching `endif.
+  size_t closer = lines.size();
+  depth = 0;
+  for (size_t j = opener + 1; j < lines.size(); ++j) {
+    const std::string_view t = TrimSpaces(lines[j].text);
+    if (IsConditionalOpen(t)) {
+      ++depth;
+    } else if (StartsWithDirective(t, "endif")) {
+      if (depth == 0) {
+        closer = j;
+        break;
+      }
+      --depth;
+    }
+  }
+  if (closer == lines.size()) return std::nullopt;
+  for (size_t j = opener + 1; j < closer; ++j) {
+    const size_t line_end = lines[j].begin + lines[j].text.size();
+    bool disabled_line = false;
+    for (const auto &d : disabled) {
+      if (lines[j].begin < d.second && d.first < line_end) disabled_line = true;
+    }
+    const std::string_view t = TrimSpaces(lines[j].text);
+    if (disabled_line || t.empty() || IsAnyDirective(t) || t.starts_with("//")) continue;
+    return LeadingSpaces(lines[j].text);
+  }
+  return std::nullopt;
+}
+
 struct BranchWrapper {
   std::string_view prolog;      // ends with '\n'
   std::string_view second_line;  // expected start of the prolog's last line, if any
@@ -262,9 +358,10 @@ constexpr BranchWrapper kBranchWrappers[] = {
     {"module __svfmt_branch__;\ninitial begin\n", "initial begin", "end"},
 };
 
-// Formats `branch` (the text of one inactive branch) and returns it, or
-// nothing if no wrapper parses it.
-std::optional<std::string> FormatBranch(std::string_view branch, const FormatStyle &style,
+// Formats `branch` (the text of one inactive branch) and returns it with its
+// lines at `indent`, or nothing if no wrapper parses it.
+std::optional<std::string> FormatBranch(std::string_view branch, std::optional<size_t> indent,
+                                        const FormatStyle &style,
                                         std::string_view filename) {
   // A multi-line block comment would have its inner lines shifted: keep it.
   if (branch.find("/*") != std::string_view::npos && branch.find('\n') != std::string_view::npos) {
@@ -280,8 +377,9 @@ std::optional<std::string> FormatBranch(std::string_view branch, const FormatSty
     control.stream = &sink;
     control.verify_convergence = false;
     std::string formatted;
-    const auto &text_structure = analyzer->get()->Data();
-    if (!FormatVerilog(text_structure, filename, style, &formatted, {}, control).ok()) continue;
+    if (!FormatVerilog(analyzer->get()->Data(), filename, style, &formatted, {}, control).ok()) {
+      continue;
+    }
 
     std::vector<std::string_view> lines = SplitLines(formatted);
     while (!lines.empty() && TrimSpaces(lines.back()).empty()) lines.pop_back();
@@ -290,7 +388,8 @@ std::optional<std::string> FormatBranch(std::string_view branch, const FormatSty
     if (lines.size() < prolog_lines + closing_lines + 2) continue;
     if (TrimSpaces(lines.front()) != "module __svfmt_branch__;") continue;
     if (TrimSpaces(lines.back()) != "endmodule") continue;
-    if (!w.second_line.empty() && TrimSpaces(lines[1]).substr(0, w.second_line.size()) != w.second_line) {
+    if (!w.second_line.empty() &&
+        TrimSpaces(lines[1]).substr(0, w.second_line.size()) != w.second_line) {
       continue;
     }
     if (closing_lines && TrimSpaces(lines[lines.size() - 2]) != w.closing) continue;
@@ -298,38 +397,104 @@ std::optional<std::string> FormatBranch(std::string_view branch, const FormatSty
     const size_t body_begin = prolog_lines;
     const size_t body_end = lines.size() - 1 - closing_lines;
     if (body_end <= body_begin) continue;
-    // The lines keep the wrapper's indentation: the formatter indents the
-    // first line of a verbatim branch itself, so shifting the rest would make
-    // the result depend on the previous pass.
+    // Shift the lines after the first from the wrapper's indentation to
+    // `indent`. The first line is indented by the formatter itself.
+    const size_t base = LeadingSpaces(lines[body_begin]);
+    const size_t target = indent.value_or(base);
+    const bool shift_right = target >= base;
+    const size_t shift = shift_right ? target - base : base - target;
+
     std::string result;
     for (size_t i = body_begin; i < body_end; ++i) {
       if (i > body_begin) result += '\n';
-      // The text before the branch keeps the line's indentation.
-      result += std::string(i == body_begin ? TrimSpaces(lines[i]) : lines[i]);
+      if (i == body_begin) {
+        result += std::string(TrimSpaces(lines[i]));
+      } else if (TrimSpaces(lines[i]).empty()) {
+        // Blank line: nothing to shift.
+      } else if (shift_right) {
+        result.append(shift, ' ');
+        result += std::string(lines[i]);
+      } else {
+        result += std::string(lines[i].substr(std::min(shift, LeadingSpaces(lines[i]))));
+      }
     }
     return result;
   }
   return std::nullopt;
 }
 
-// Returns `text` with each inactive branch replaced by its formatted form.
-std::string PreformatDisabledBranches(std::string_view text, std::string_view filename,
-                                      const FormatStyle &style) {
-  std::string out(text);
+// Formats `text` without the branch pre-pass.
+std::optional<std::string> FormatPlain(std::string_view text, std::string_view filename,
+                                       const FormatStyle &style) {
   const auto analyzer = ParseWithStatus(text, filename);
-  if (!analyzer.ok()) return out;
-  const auto ranges = analyzer->get()->DisabledBranchRanges();
+  if (!analyzer.ok()) return std::nullopt;
+  std::ostringstream sink;
+  ExecutionControl control;
+  control.stream = &sink;
+  control.verify_convergence = false;
+  std::string formatted;
+  if (!FormatVerilog(analyzer->get()->Data(), filename, style, &formatted, {}, control).ok()) {
+    return std::nullopt;
+  }
+  return formatted;
+}
+
+// Returns `text` with each inactive branch formatted. The file is formatted
+// once first: the indentation of each branch comes from the formatted active
+// code of its conditional, so the result does not depend on the input's
+// indentation of the branches.
+std::string PreformatDisabledBranchesOnce(std::string_view text, std::string_view filename,
+                                          const FormatStyle &style) {
+  const auto analyzer = ParseWithStatus(text, filename);
+  if (!analyzer.ok()) return std::string(text);
+  const auto &disabled_ranges = analyzer->get()->DisabledBranchRanges();
+  if (disabled_ranges.empty()) return std::string(text);
+  const auto formatted = FormatPlain(text, filename, style);
+  if (!formatted) return std::string(text);
+
+  const auto formatted_analyzer = ParseWithStatus(*formatted, filename);
+  if (!formatted_analyzer.ok()) return std::string(text);
+  std::vector<std::pair<size_t, size_t>> ranges;
+  for (const auto &[begin, end] : formatted_analyzer->get()->DisabledBranchRanges()) {
+    ranges.emplace_back(static_cast<size_t>(begin), static_cast<size_t>(end));
+  }
+  const auto lines = LinesWithOffsets(*formatted);
+  std::vector<std::optional<size_t>> indents;
+  for (const auto &range : ranges) indents.push_back(GroupIndent(lines, range, ranges));
+
+  std::string out = *formatted;
   // Last first, so that earlier offsets stay valid.
-  for (auto it = ranges.rbegin(); it != ranges.rend(); ++it) {
-    const size_t begin = static_cast<size_t>(it->first);
-    const size_t end = static_cast<size_t>(it->second);
+  for (size_t i = ranges.size(); i-- > 0;) {
+    const auto [begin, end] = ranges[i];
     if (begin >= end || end > out.size()) continue;
     const std::string branch = out.substr(begin, end - begin);
-    if (auto formatted = FormatBranch(branch, style, filename)) {
-      out.replace(begin, end - begin, *formatted);
+    if (auto replacement = FormatBranch(branch, indents[i], style, filename)) {
+      out.replace(begin, end - begin, *replacement);
     }
   }
   return out;
+}
+
+// The branches' indentation depends on the formatted active code, which in
+// turn depends on the branches' text (alignment), so repeat until stable.
+std::string PreformatDisabledBranches(std::string_view text, std::string_view filename,
+                                      const FormatStyle &style) {
+  std::string current(text);
+  for (int round = 0; round < 3; ++round) {
+    std::string next = PreformatDisabledBranchesOnce(current, filename, style);
+    if (next == current) break;
+    current = std::move(next);
+  }
+  // Keep the change only if formatting the result is stable; otherwise the
+  // branches stay as they were.
+  const auto once = FormatPlain(current, filename, style);
+  const auto twice = once ? FormatPlain(*once, filename, style) : std::nullopt;
+  if (!once || !twice || *once != *twice) return std::string(text);
+  // Formatting the result runs this pre-pass again: it must change nothing.
+  if (PreformatDisabledBranchesOnce(current, filename, style) != current) {
+    return std::string(text);
+  }
+  return current;
 }
 
 }  // namespace
