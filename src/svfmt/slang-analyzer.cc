@@ -522,9 +522,8 @@ class SlangAnalyzer::Builder {
                 auto child = args.args.getChild(i);
                 if (child.isNode()) {
                   const auto &toks = child.node()->as<MacroActualArgumentSyntax>().tokens;
-                  if (!ConvertMacroArgExpression(toks, list)) {
-                    EmitMerged(toks, MacroArg, list, /*verbatim=*/false);
-                  }
+                  std::vector<Token> arg(toks.begin(), toks.end());
+                  ConvertMacroArg(arg, list);
                 } else {
                   EmitDirectiveToken(child.token(), ',', list);
                 }
@@ -632,7 +631,74 @@ class SlangAnalyzer::Builder {
   // Like Verible's macro argument expansion: if a macro argument parses as an
   // expression on its own, convert it into an expression subtree (so it is
   // formatted); otherwise the caller keeps it as one MacroArg token.
-  bool ConvertMacroArgExpression(const slang::syntax::TokenList &toks, SyntaxTreeNode &list) {
+  void ConvertMacroArg(std::span<const Token> toks, SyntaxTreeNode &list) {
+    if (ConvertMacroArgExpression(toks, list)) return;
+    if (ConvertNestedMacroCall(toks, list)) return;
+    EmitMerged(toks, MacroArg, list, /*verbatim=*/false);
+  }
+
+  // A macro argument that is itself a macro call ("`B(x, `C(y))", as Verible
+  // lexes it): a MacroUsage subtree whose arguments are converted in turn.
+  bool ConvertNestedMacroCall(std::span<const Token> toks, SyntaxTreeNode &list) {
+    using slang::parsing::TokenKind;
+    if (toks.size() < 3 || base_offset_ != 0) return false;
+    if (toks[0].kind != TokenKind::Directive ||
+        toks[0].directiveKind() != slang::syntax::SyntaxKind::MacroUsage ||
+        toks[1].kind != TokenKind::OpenParenthesis ||
+        toks.back().kind != TokenKind::CloseParenthesis) {
+      return false;
+    }
+    // Verible lexes "`B (x)" as a call too, but not across a comment.
+    for (const auto &trivia : toks[1].trivia()) {
+      if (trivia.kind != slang::parsing::TriviaKind::Whitespace) return false;
+    }
+    for (const auto &t : toks) {
+      if (t.location().buffer() != buffer_) return false;
+    }
+    // Top-level commas; the first '(' must close at the last token.
+    std::vector<size_t> commas;
+    int depth = 0;
+    for (size_t i = 1; i < toks.size(); ++i) {
+      switch (toks[i].kind) {
+        case TokenKind::OpenParenthesis:
+        case TokenKind::OpenBracket:
+        case TokenKind::OpenBrace:
+        case TokenKind::ApostropheOpenBrace:
+          ++depth;
+          break;
+        case TokenKind::CloseParenthesis:
+        case TokenKind::CloseBracket:
+        case TokenKind::CloseBrace:
+          if (--depth == 0 && i + 1 != toks.size()) return false;
+          break;
+        case TokenKind::Comma:
+          if (depth == 1) commas.push_back(i);
+          break;
+        default:
+          break;
+      }
+    }
+    if (depth != 0) return false;
+    auto call = std::make_unique<SyntaxTreeNode>(static_cast<int>(slang::syntax::SyntaxKind::MacroUsage));
+    EmitDirectiveToken(toks[0], MacroCallId, *call);
+    Group(GroupKind::kParenGroup, *call, [&](SyntaxTreeNode &paren) {
+      EmitDirectiveToken(toks[1], '(', paren);
+      Group(GroupKind::kMacroArgList, paren, [&](SyntaxTreeNode &args) {
+        size_t begin = 2;
+        commas.push_back(toks.size() - 1);
+        for (size_t comma : commas) {
+          if (comma > begin) ConvertMacroArg(toks.subspan(begin, comma - begin), args);
+          if (comma + 1 != toks.size()) EmitDirectiveToken(toks[comma], ',', args);
+          begin = comma + 1;
+        }
+      });
+      EmitDirectiveToken(toks.back(), ')', paren);
+    });
+    list.AppendChild(std::move(call));
+    return true;
+  }
+
+  bool ConvertMacroArgExpression(std::span<const Token> toks, SyntaxTreeNode &list) {
     if (toks.empty() || base_offset_ != 0) return false;
     const Token &first = toks[0];
     const Token &last = toks[toks.size() - 1];

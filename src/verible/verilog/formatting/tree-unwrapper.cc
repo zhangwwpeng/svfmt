@@ -2832,6 +2832,13 @@ void TreeUnwrapper::ReshapeTokenPartitions(
       }
       case SyntaxKind::BindDirective: {
         AttachTrailingSemicolonToPreviousPartition(&partition);
+        // Verible: "bind target" leads the instantiation's first line
+        // ("bind target type #(").
+        auto &children = partition.Children();
+        if (children.size() == 2 && is_leaf(children.front()) && !is_leaf(children.back())) {
+          verible::MergeLeafIntoNextLeaf(&children.front());
+          HoistOnlyChildPartition(&partition);
+        }
         break;
       }
       case SyntaxKind::ModuleHeader:
@@ -2905,7 +2912,8 @@ void TreeUnwrapper::ReshapeTokenPartitions(
           const auto text = verible::SymbolCastToLeaf(*node.front()).get().text();
           if (absl::StartsWith(text, "`uvm_") && absl::EndsWith(text, "_end") &&
               (DirectParentTag(Context()) == Tag(ListKind::ClassDeclaration_items) ||
-               DirectParentTag(Context()) == Tag(ListKind::ModuleDeclaration_members))) {
+               DirectParentTag(Context()) == Tag(ListKind::ModuleDeclaration_members) ||
+               DirectParentTag(Context()) == Tag(ListKind::CompilationUnit_members))) {
             IndentBetweenUVMBeginEndMacros(&partition, style.indentation_spaces);
           }
         }
