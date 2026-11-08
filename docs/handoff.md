@@ -87,3 +87,13 @@ build/svfmt --dump_cst x.sv; build/svfmt --show_token_partition_tree x.sv
    `initial begin ... end`, expression), use the first that parses, strip
    the wrapper after formatting, and lexcmp the fragment. --lines does not
    cover this: it still needs the whole file to parse (Verible: same).
+9. 01-sv-compliance, vibe round (2026-11-08), checked by hand:
+   - R1: a long nested-ternary localparam (Surelog BlackParrot*) hits the
+     line-wrap search limit. --max_search_states=10000000 formats it (~10 s);
+     the default is left as is (trade-off, not a semantic issue).
+   - R2: IEEE 1735 protected envelope (`pragma protect key_block ...) is
+     skipped by slang with a warning; rejection is the correct outcome.
+   - R3: `module top import P::FOO; ;` is rejected by slang ("expected
+     parameter list or port list") but accepted by Verible; probably a slang
+     strictness difference (unverified against the LRM text). Rejection is safe.
+   - N1, N2: the not_idempotent leftovers of item 7 (Verible: same).
