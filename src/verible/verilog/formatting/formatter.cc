@@ -21,6 +21,7 @@
 #include <functional>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -215,6 +216,124 @@ static absl::StatusOr<std::unique_ptr<svfmt::SlangAnalyzer>> ParseWithStatus(
   return svfmt::SlangAnalyzer::Analyze(text, filename, svfmt::GlobalAnalyzerOptions());
 }
 
+// svfmt: an inactive `ifdef / `else branch is kept verbatim when the branches
+// cannot be parsed together (e.g. a missing ',' that is an error only once
+// both branches are active). Such a branch is formatted on its own, inside a
+// wrapper that parses it, and put back. The formatter then indents its first line.
+// Only whitespace changes; the wrapper is checked like any other input.
+namespace {
+
+std::string_view TrimSpaces(std::string_view s) {
+  while (!s.empty() && (s.front() == ' ' || s.front() == '\t' || s.front() == '\r')) {
+    s.remove_prefix(1);
+  }
+  while (!s.empty() && (s.back() == ' ' || s.back() == '\t' || s.back() == '\r')) {
+    s.remove_suffix(1);
+  }
+  return s;
+}
+
+std::vector<std::string_view> SplitLines(std::string_view s) {
+  std::vector<std::string_view> lines;
+  size_t start = 0;
+  while (start <= s.size()) {
+    size_t nl = s.find('\n', start);
+    if (nl == std::string_view::npos) {
+      lines.push_back(s.substr(start));
+      break;
+    }
+    lines.push_back(s.substr(start, nl - start));
+    start = nl + 1;
+  }
+  return lines;
+}
+
+struct BranchWrapper {
+  std::string_view prolog;      // ends with '\n'
+  std::string_view second_line;  // expected start of the prolog's last line, if any
+  std::string_view closing;     // one line before "endmodule", if any
+};
+
+// Module items; port connections of an instance; statements in a block.
+constexpr BranchWrapper kBranchWrappers[] = {
+    {"module __svfmt_branch__;\n", "", ""},
+    // The trailing comment keeps the port list on several lines.
+    {"module __svfmt_branch__;\nfoo __svfmt_branch_inst__ ( // svfmt\n", "foo __svfmt_branch_inst__ (", ");"},
+    {"module __svfmt_branch__;\ninitial begin\n", "initial begin", "end"},
+};
+
+// Formats `branch` (the text of one inactive branch) and returns it, or
+// nothing if no wrapper parses it.
+std::optional<std::string> FormatBranch(std::string_view branch, const FormatStyle &style,
+                                        std::string_view filename) {
+  // A multi-line block comment would have its inner lines shifted: keep it.
+  if (branch.find("/*") != std::string_view::npos && branch.find('\n') != std::string_view::npos) {
+    return std::nullopt;
+  }
+  for (const BranchWrapper &w : kBranchWrappers) {
+    std::string wrapped = absl::StrCat(w.prolog, branch, "\n", w.closing,
+                                       w.closing.empty() ? "" : "\n", "endmodule\n");
+    const auto analyzer = ParseWithStatus(wrapped, filename);
+    if (!analyzer.ok()) continue;
+    std::ostringstream sink;
+    ExecutionControl control;
+    control.stream = &sink;
+    control.verify_convergence = false;
+    std::string formatted;
+    const auto &text_structure = analyzer->get()->Data();
+    if (!FormatVerilog(text_structure, filename, style, &formatted, {}, control).ok()) continue;
+
+    std::vector<std::string_view> lines = SplitLines(formatted);
+    while (!lines.empty() && TrimSpaces(lines.back()).empty()) lines.pop_back();
+    const size_t prolog_lines = static_cast<size_t>(std::count(w.prolog.begin(), w.prolog.end(), '\n'));
+    const size_t closing_lines = w.closing.empty() ? 0 : 1;
+    if (lines.size() < prolog_lines + closing_lines + 2) continue;
+    if (TrimSpaces(lines.front()) != "module __svfmt_branch__;") continue;
+    if (TrimSpaces(lines.back()) != "endmodule") continue;
+    if (!w.second_line.empty() && TrimSpaces(lines[1]).substr(0, w.second_line.size()) != w.second_line) {
+      continue;
+    }
+    if (closing_lines && TrimSpaces(lines[lines.size() - 2]) != w.closing) continue;
+
+    const size_t body_begin = prolog_lines;
+    const size_t body_end = lines.size() - 1 - closing_lines;
+    if (body_end <= body_begin) continue;
+    // The lines keep the wrapper's indentation: the formatter indents the
+    // first line of a verbatim branch itself, so shifting the rest would make
+    // the result depend on the previous pass.
+    std::string result;
+    for (size_t i = body_begin; i < body_end; ++i) {
+      if (i > body_begin) result += '\n';
+      // The text before the branch keeps the line's indentation.
+      result += std::string(i == body_begin ? TrimSpaces(lines[i]) : lines[i]);
+    }
+    return result;
+  }
+  return std::nullopt;
+}
+
+// Returns `text` with each inactive branch replaced by its formatted form.
+std::string PreformatDisabledBranches(std::string_view text, std::string_view filename,
+                                      const FormatStyle &style) {
+  std::string out(text);
+  const auto analyzer = ParseWithStatus(text, filename);
+  if (!analyzer.ok()) return out;
+  const auto ranges = analyzer->get()->DisabledBranchRanges();
+  // Last first, so that earlier offsets stay valid.
+  for (auto it = ranges.rbegin(); it != ranges.rend(); ++it) {
+    const size_t begin = static_cast<size_t>(it->first);
+    const size_t end = static_cast<size_t>(it->second);
+    if (begin >= end || end > out.size()) continue;
+    const std::string branch = out.substr(begin, end - begin);
+    if (auto formatted = FormatBranch(branch, style, filename)) {
+      out.replace(begin, end - begin, *formatted);
+    }
+  }
+  return out;
+}
+
+}  // namespace
+
 absl::Status FormatVerilog(const verible::TextStructureView &text_structure,
                            std::string_view filename, const FormatStyle &style,
                            std::string *formatted_text,
@@ -258,6 +377,12 @@ Status FormatVerilog(std::string_view text, std::string_view filename,
                      const FormatStyle &style, std::ostream &formatted_stream,
                      const LineNumberSet &lines,
                      const ExecutionControl &control) {
+  // Whole file only: line-restricted formatting keeps the text as it is.
+  std::string prepared;
+  if (lines.empty()) {
+    prepared = PreformatDisabledBranches(text, filename, style);
+    text = prepared;
+  }
   const auto analyzer = ParseWithStatus(text, filename);
   if (!analyzer.ok()) return analyzer.status();
 

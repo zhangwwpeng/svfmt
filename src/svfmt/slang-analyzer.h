@@ -91,6 +91,12 @@ class SlangAnalyzer {
     return verbatim_ranges_;
   }
 
+  // Byte ranges [begin, end) of inactive `ifdef / `else branch text (a subset
+  // of VerbatimRanges()): the formatter may format these on their own.
+  const std::vector<std::pair<int, int>> &DisabledBranchRanges() const {
+    return disabled_branch_ranges_;
+  }
+
   // Formatted diagnostics from slang (errors and warnings).
   const std::string &Diagnostics() const { return diagnostics_; }
 
@@ -109,6 +115,7 @@ class SlangAnalyzer {
   absl::flat_hash_map<const verible::Symbol *, const slang::syntax::SyntaxNode *>
       origins_;
   std::vector<std::pair<int, int>> verbatim_ranges_;
+  std::vector<std::pair<int, int>> disabled_branch_ranges_;
   std::string diagnostics_;
 };
 

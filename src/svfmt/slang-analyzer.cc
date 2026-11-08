@@ -501,6 +501,7 @@ class SlangAnalyzer::Builder {
     if (last.location().buffer() != buffer_ || end <= begin) return;
     std::string_view text = contents_.substr(begin, end - begin);
     analyzer_.verbatim_ranges_.emplace_back(begin, begin + text.size());
+    analyzer_.disabled_branch_ranges_.emplace_back(begin, begin + text.size());
     // Its own group, so that the formatter can indent it apart from the
     // directive line.
     auto group = std::make_unique<SyntaxTreeNode>(static_cast<int>(GroupKind::kDisabledBranch));
