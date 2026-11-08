@@ -1563,8 +1563,45 @@ std::vector<std::pair<std::string, std::string>> IncludePlaceholders(
 
 }  // namespace
 
+// Replaces each tab with a space, except inside comments, string literals and
+// "verilog_format: off" regions (kept verbatim). Only whitespace changes.
+std::string TabsToSpaces(std::string_view text) {
+  std::string out(text);
+  size_t i = 0;
+  const size_t n = text.size();
+  bool off = false;
+  while (i < n) {
+    const char c = text[i];
+    if (c == '/' && i + 1 < n && text[i + 1] == '/') {
+      const size_t begin = i;
+      while (i < n && text[i] != '\n') ++i;
+      const std::string_view comment = text.substr(begin, i - begin);
+      if (comment.find("verilog_format: off") != std::string_view::npos) off = true;
+      if (comment.find("verilog_format: on") != std::string_view::npos) off = false;
+    } else if (c == '/' && i + 1 < n && text[i + 1] == '*') {
+      const size_t e = text.find("*/", i + 2);
+      const size_t end = e == std::string_view::npos ? n : e + 2;
+      const std::string_view comment = text.substr(i, end - i);
+      if (comment.find("verilog_format: off") != std::string_view::npos) off = true;
+      if (comment.find("verilog_format: on") != std::string_view::npos) off = false;
+      i = end;
+    } else if (c == '"') {
+      ++i;
+      while (i < n && text[i] != '"' && text[i] != '\n') i += text[i] == '\\' ? 2 : 1;
+      ++i;
+    } else {
+      if (c == '\t' && !off) out[i] = ' ';
+      ++i;
+    }
+  }
+  return out;
+}
+
 absl::StatusOr<std::unique_ptr<SlangAnalyzer>> SlangAnalyzer::Analyze(
     std::string_view text, std::string_view filename, const AnalyzerOptions &options) {
+  // Tabs are formatted as spaces (outside comments and strings).
+  const std::string spaced = TabsToSpaces(text);
+  text = spaced;
   const ParseMode *mode = FindParseMode(ScanParseModeDirective(text));
   // Prefer parsing every `ifdef branch (like Verible); fall back to normal
   // preprocessing, which leaves inactive branches verbatim.

@@ -2728,6 +2728,17 @@ static void HandleDataDeclaration(const SyntaxTreeNode &node,
 // and occurs on the return path of partition tree construction.
 // TODO: this method is long; possibly break out functionality similar to
 // HandleDataDeclaration().
+// The header of a subroutine (return type, dimensions, name, opening paren)
+// stays on one line: a break is only allowed inside the port list, which is
+// the first child that is not a leaf.
+static void MergeLeadingLeafPartitions(TokenPartitionTree *partition) {
+  auto &children = partition->Children();
+  size_t k = 0;
+  while (k < children.size() && is_leaf(children[k])) ++k;
+  if (k == children.size()) return;  // no port list
+  for (size_t i = k; i-- > 1;) verible::MergeLeafIntoPreviousLeaf(&children[i]);
+}
+
 void TreeUnwrapper::ReshapeTokenPartitions(
     const SyntaxTreeNode &node, const FormatStyle &style,
     TokenPartitionTree *recent_partition) {
@@ -2831,6 +2842,7 @@ void TreeUnwrapper::ReshapeTokenPartitions(
         break;
       }
       case GroupKind::kSubroutineHeader: {
+        MergeLeadingLeafPartitions(&partition);
         // May end up with a trailing ");" subpartition; attach it to the item
         // that preceded it.
         auto &last = RightmostDescendant(partition);
@@ -2891,6 +2903,9 @@ void TreeUnwrapper::ReshapeTokenPartitions(
         }
         break;
       }
+      case SyntaxKind::ClassMethodPrototype:
+        MergeLeadingLeafPartitions(&partition);
+        break;
       case SyntaxKind::ModuleHeader:
       case SyntaxKind::InterfaceHeader:
       case SyntaxKind::ProgramHeader: {
@@ -3041,6 +3056,7 @@ void TreeUnwrapper::ReshapeTokenPartitions(
 
       case SyntaxKind::ContinuousAssign: {  // e.g. assign a=0, b=2;
         FlattenOnlyChildrenWithChildren(partition);
+        AttachOpeningBraceToDeclarationsAssignmentOperator(&partition);
         AttachTrailingSemicolonToPreviousPartition(&partition);
         AttachSeparatorsToListElementPartitions(&partition);
         // Merge the 'assign' keyword with the (first) x=y assignment.
