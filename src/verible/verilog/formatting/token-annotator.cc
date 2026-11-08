@@ -195,6 +195,16 @@ static WithReason<int> SpacesRequiredBetween(
             "Space after verbatim macro formal arguments"};
   }
 
+  // svfmt: inactive branch text after `ifdef / `elsif / `else (its line break
+  // is decided in BreakDecisionBetween).
+  if (right.TokenEnum() == svfmt::TK_SVFMT_DISABLED_TEXT &&
+      (svfmt::IsInside(left_context, SyntaxKind::IfDefDirective) ||
+       svfmt::IsInside(left_context, SyntaxKind::IfNDefDirective) ||
+       svfmt::IsInside(left_context, SyntaxKind::ElsIfDirective) ||
+       svfmt::IsInside(left_context, SyntaxKind::ElseDirective))) {
+    return {1, "Space before inactive branch text."};
+  }
+
   // Preserve space after escaped identifiers.
   if (left.TokenEnum() == EscapedIdentifier) {
     return {1, "Escaped identifiers must end with whitespace."};
@@ -916,6 +926,15 @@ static WithReason<SpacingOptions> BreakDecisionBetween(
        svfmt::IsInside(right_context, SyntaxKind::PragmaDirective))) {
     return {SpacingOptions::kPreserve,
             "A `define or `pragma keeps its original line structure."};
+  }
+
+  // svfmt: inactive branch text starts its own line.
+  if (right.TokenEnum() == svfmt::TK_SVFMT_DISABLED_TEXT &&
+      (svfmt::IsInside(left_context, SyntaxKind::IfDefDirective) ||
+       svfmt::IsInside(left_context, SyntaxKind::IfNDefDirective) ||
+       svfmt::IsInside(left_context, SyntaxKind::ElsIfDirective) ||
+       svfmt::IsInside(left_context, SyntaxKind::ElseDirective))) {
+    return {SpacingOptions::kMustWrap, "Inactive branch text starts a new line."};
   }
 
   // svfmt: a conditional or other line-oriented directive ends its line

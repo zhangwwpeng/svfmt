@@ -1110,6 +1110,10 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
       case GroupKind::kAssertionDeclBody:
         VisitIndentedSection(node, style_.indentation_spaces, PartitionPolicyEnum::kAlwaysExpand);
         return;
+      // Inactive branch text keeps the indentation of the list it is in.
+      case GroupKind::kDisabledBranch:
+        VisitIndentedSection(node, 0, PartitionPolicyEnum::kFitOnLineElseExpand);
+        return;
       case GroupKind::kSubroutineHeader:
         if (svfmt::IsInsideAnyOf(Context(),
                                  {SyntaxKind::DPIImport, SyntaxKind::DPIExport})) {
