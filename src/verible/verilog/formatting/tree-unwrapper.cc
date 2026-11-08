@@ -881,6 +881,16 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
       Context().empty() ||
       DirectParentTag(Context()) == static_cast<int>(GroupKind::kMacroArgList);
 
+  // Each element of an assignment pattern's list is its own section (Verible:
+  // kExpression inside kAssignmentPattern), so that the list can wrap one
+  // element per line.
+  if (!svfmt::IsListTag(tag) &&
+      (DirectParentTag(Context()) == Tag(ListKind::SimpleAssignmentPattern_items) ||
+       DirectParentTag(Context()) == Tag(ListKind::StructuredAssignmentPattern_items))) {
+    VisitIndentedSection(node, 0, PartitionPolicyEnum::kFitOnLineElseExpand);
+    return;
+  }
+
   // ---- List nodes (Verible's *List nonterminals) ----
   if (svfmt::IsListTag(tag)) {
     if (IsEmptyListWithoutComments(node) &&
