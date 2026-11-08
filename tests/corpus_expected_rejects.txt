@@ -1,0 +1,9 @@
+# Corpus files that are invalid on purpose. A rejection of one of these is
+# expected (run_corpus.py reports it as expected_rejected).
+# Patterns are shell globs, relative to the corpus directory given to run_corpus.py.
+# Add a pattern only after checking that the files are meant to be illegal.
+
+# 01-sv-compliance
+sv2v/repo/test/error/*
+sv-tests/repo/tests/*/*illegal*
+sv-tests/repo/tests/*/*invalid*

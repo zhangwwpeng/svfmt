@@ -16,12 +16,17 @@ Safety (any failure here is a bug):
 
 Parity (statistics only): compare svfmt's output with verible-verilog-format.
 
+Rejections of files listed in tests/corpus_expected_rejects.txt (invalid on
+purpose, e.g. sv2v error tests) are counted as expected_rejected, not as
+ok_rejected, so the remaining ok_rejected are the rejections to look at.
+
 Exit status is non-zero if any safety check fails.
 """
 import argparse
 import json
 import shlex
 import concurrent.futures as cf
+import fnmatch
 import os
 import shutil
 import subprocess
@@ -40,6 +45,10 @@ p.add_argument('--no-parity', action='store_true', help='skip the Verible compar
 p.add_argument('--cases', default=None,
                help='write one directory per safety failure (input, outputs, logs, repro)')
 p.add_argument('--jsonl', default=None, help='write one JSON result per file')
+p.add_argument('--expected-rejects', default=os.path.join(
+                   os.path.dirname(os.path.abspath(__file__)), 'corpus_expected_rejects.txt'),
+               help='glob patterns (relative to <corpus dir>) of files that are invalid on '
+                    'purpose; a rejection of one is reported as expected_rejected')
 args = p.parse_args()
 
 svfmt = os.path.join(args.build, 'svfmt')
@@ -143,6 +152,19 @@ with cf.ThreadPoolExecutor(max_workers=args.jobs) as ex:
     for r in ex.map(check, enumerate(files)):
         results.append(r)
 
+# A rejection of a file listed as invalid on purpose is not a finding.
+expected_patterns = []
+if os.path.exists(args.expected_rejects):
+    with open(args.expected_rejects) as f:
+        expected_patterns = [line.split('#')[0].strip() for line in f]
+        expected_patterns = [p for p in expected_patterns if p]
+for r in results:
+    if r['safety'] != 'ok_rejected':
+        continue
+    rel = os.path.relpath(r['path'], args.corpus)
+    if any(fnmatch.fnmatch(rel, pat) for pat in expected_patterns):
+        r['safety'] = 'expected_rejected'
+
 
 def count(key, val):
     return sum(1 for r in results if r.get(key) == val)
@@ -150,7 +172,7 @@ def count(key, val):
 
 print(f'files: {len(results)}')
 print('safety:')
-for k in ['ok_formatted', 'ok_rejected'] + BAD:
+for k in ['ok_formatted', 'ok_rejected', 'expected_rejected'] + BAD:
     print(f'  {k:22s} {count("safety", k)}')
 if have_verible:
     print('parity with verible (formatted files only):')
@@ -159,7 +181,7 @@ if have_verible:
 
 if args.out:
     os.makedirs(args.out, exist_ok=True)
-    for k in BAD + ['ok_rejected']:
+    for k in BAD + ['ok_rejected', 'expected_rejected']:
         with open(os.path.join(args.out, f'{k}.txt'), 'w') as f:
             for r in results:
                 if r['safety'] == k:

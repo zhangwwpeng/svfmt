@@ -77,3 +77,11 @@ To add a case: put the file in `tests/inputs/`, run
 `tests/update_expected.sh build-dev/svfmt`, check the new file in
 `tests/expected/` by eye, and commit both. After an intended formatting
 change, re-run the script and review the diff in git.
+
+## Expected rejections (corpus)
+
+`tests/corpus_expected_rejects.txt` lists corpus files that are invalid on
+purpose (e.g. sv2v `test/error`, sv-tests `illegal`/`invalid`). `run_corpus.py`
+reports a rejection of one of them as `expected_rejected`; any other rejection
+stays `ok_rejected` and is the one to review. Add a pattern only after checking
+that the files are meant to be illegal.
