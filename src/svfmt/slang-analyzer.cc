@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <map>
 #include <memory>
+#include <set>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -1634,16 +1635,16 @@ std::vector<std::string> StubDefinitions(std::string_view text,
 
 namespace {
 
-// `include "name" files that exist neither next to `filename` nor in an
-// include directory. Returns (absolute path where the file would be read from
-// for the local lookup, text) pairs with `content` as the text.
-std::vector<std::pair<std::string, std::string>> MissingIncludePlaceholders(
-    std::string_view text, std::string_view filename, const AnalyzerOptions &options,
-    std::string_view content) {
+// Every `include "name" is replaced by a placeholder buffer registered under
+// the path slang would read it from. The formatter works on one file: include
+// files are never read, so their contents (and their macros) are unknown.
+// Returns (absolute path, text) pairs with `content` as the text.
+std::vector<std::pair<std::string, std::string>> IncludePlaceholders(
+    std::string_view text, std::string_view filename, std::string_view content) {
   namespace fs = std::filesystem;
   std::vector<std::pair<std::string, std::string>> out;
+  std::set<std::string> seen;
   const fs::path dir = fs::path(filename).parent_path();
-  std::error_code ec;
   for (size_t pos = text.find("`include"); pos != std::string_view::npos;
        pos = text.find("`include", pos)) {
     size_t p = pos + 8;
@@ -1654,16 +1655,11 @@ std::vector<std::pair<std::string, std::string>> MissingIncludePlaceholders(
     if (close == std::string_view::npos) continue;
     const std::string_view name_text = text.substr(p + 1, close - p - 1);
     if (name_text.empty() || name_text.find('\n') != std::string_view::npos) continue;
-    const std::string name(name_text);
-    bool found = fs::exists(dir / name, ec);
-    for (const auto &d : options.include_dirs) {
-      found = found || fs::exists(fs::path(d) / name, ec);
-    }
-    if (found) continue;
-    fs::path local = dir / name;
-    std::error_code canon_ec;
-    fs::path canonical = fs::weakly_canonical(local, canon_ec);
-    out.emplace_back(canon_ec ? local.string() : canonical.string(), std::string(content));
+    const fs::path local = dir / std::string(name_text);
+    std::error_code ec;
+    fs::path canonical = fs::weakly_canonical(local, ec);
+    std::string path = ec ? local.string() : canonical.string();
+    if (seen.insert(path).second) out.emplace_back(std::move(path), std::string(content));
   }
   return out;
 }
@@ -1676,19 +1672,20 @@ absl::StatusOr<std::unique_ptr<SlangAnalyzer>> SlangAnalyzer::Analyze(
   // Prefer parsing every `ifdef branch (like Verible); fall back to normal
   // preprocessing, which leaves inactive branches verbatim.
   const bool has_conditionals = !ScanConditionalDirectives(text).empty();
+  // Include files are placeholders from the start (see IncludePlaceholders).
+  AnalyzerOptions base = options;
+  base.placeholder_includes = IncludePlaceholders(text, filename, "");
   auto attempt = [&](const ParseMode *m) {
-    auto r = AnalyzeWithMode(text, filename, options, m, /*all_branches=*/true);
+    auto r = AnalyzeWithMode(text, filename, base, m, /*all_branches=*/true);
     if (!r.ok() && has_conditionals) {
-      r = AnalyzeWithMode(text, filename, options, m, /*all_branches=*/false);
+      r = AnalyzeWithMode(text, filename, base, m, /*all_branches=*/false);
     }
     if (!r.ok()) {
-      // A missing `include may supply items (no placeholder needed), a port
-      // (followed by ',') or the last port (no ','): try the forms in turn.
+      // An empty include supplies items; a port needs a ',' after it, or
+      // none if it is the last port: try the forms in turn.
       for (const char *content : {"input __svfmt_include__,", "input __svfmt_include__"}) {
-        auto placeholders = MissingIncludePlaceholders(text, filename, options, content);
-        if (placeholders.empty()) break;
-        AnalyzerOptions with = options;
-        with.placeholder_includes = std::move(placeholders);
+        AnalyzerOptions with = base;
+        with.placeholder_includes = IncludePlaceholders(text, filename, content);
         auto retry = AnalyzeWithMode(text, filename, with, m, /*all_branches=*/true);
         if (retry.ok()) return retry;
       }
