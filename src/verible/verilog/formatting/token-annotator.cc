@@ -351,6 +351,12 @@ static WithReason<int> SpacesRequiredBetween(
 
   // TODO(fangism): Never insert trailing spaces before a newline.
 
+  // Modport port name separator, e.g. "input .a(...)" (only the leading '.').
+  if (right.TokenEnum() == '.' &&
+      DirectParentIs(right_context, SyntaxKind::ModportExplicitPort)) {
+    return {1, "Space before modport explicit port name '.'"};
+  }
+
   // Hierarchy examples: "a.b", "a::b"
   if (left.format_token_enum == FormatTokenType::hierarchy ||
       right.format_token_enum == FormatTokenType::hierarchy) {
@@ -618,12 +624,16 @@ static WithReason<int> SpacesRequiredBetween(
         !IsInside(left_context, SyntaxKind::ScopedName);
     // A parameterized class type used as a declaration's data type is what
     // Verible calls kInstantiationType ("foo #(1) bar;").
+    // The type may be package-qualified ("pkg::foo #(1) bar;").
+    int type_depth = 1;
+    while (AncestorKind(left_context, type_depth) == SyntaxKind::ScopedName) ++type_depth;
+    const SyntaxKind declaration = AncestorKind(left_context, type_depth + 1);
     const bool is_instantiation_type =
-        AncestorKind(left_context, 1) == SyntaxKind::NamedType &&
-        (AncestorKind(left_context, 2) == SyntaxKind::DataDeclaration ||
-         AncestorKind(left_context, 2) == SyntaxKind::ClassPropertyDeclaration ||
-         AncestorKind(left_context, 2) == svfmt::G(svfmt::GroupKind::kInstantiationType) ||
-         AncestorKind(left_context, 2) == SyntaxKind::StructUnionMember);
+        AncestorKind(left_context, type_depth) == SyntaxKind::NamedType &&
+        (declaration == SyntaxKind::DataDeclaration ||
+         declaration == SyntaxKind::ClassPropertyDeclaration ||
+         declaration == svfmt::G(svfmt::GroupKind::kInstantiationType) ||
+         declaration == SyntaxKind::StructUnionMember);
 
     if (DirectParentIs(left_context, SyntaxKind::ClassName) &&
         !is_instantiation_type &&

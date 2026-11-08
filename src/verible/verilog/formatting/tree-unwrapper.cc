@@ -1227,6 +1227,7 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
     case SyntaxKind::WildcardPortConnection:
     case SyntaxKind::MacroFormalArgument:
     case SyntaxKind::FunctionPort:  // kPortItem
+    case SyntaxKind::ClockingItem:
     case SyntaxKind::PropertyDeclaration:
     case SyntaxKind::SequenceDeclaration:
     case SyntaxKind::ImplicitAnsiPort:

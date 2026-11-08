@@ -56,6 +56,7 @@ const absl::flat_hash_map<std::string_view, int> &AliasMap() {
     for (const auto &entry : verilog::kVerilogTokenTable) {
       if (entry.alias != nullptr) m->emplace(entry.alias, entry.value);
     }
+    m->emplace("^~", TK_NXOR);  // Verible lexes both spellings as TK_NXOR
     return m;
   }();
   return *map;
@@ -877,6 +878,15 @@ class SlangAnalyzer::Builder {
         });
         Tok(n.end, out);
         Child(n.endBlockName, out);
+        return true;
+      }
+      case SyntaxKind::WithFunctionSample: {
+        // Verible lexes "sample" here as the keyword TK_sample.
+        const auto &n = node.as<WithFunctionSampleSyntax>();
+        Tok(n.with, out);
+        Tok(n.function, out);
+        EmitDirectiveToken(n.sample, TK_sample, out);
+        Child(n.portList, out);
         return true;
       }
       case SyntaxKind::WaitStatement: {
