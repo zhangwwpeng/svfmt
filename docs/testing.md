@@ -68,3 +68,12 @@ These run on every format, as in Verible:
   change nothing.
 
 If a check fails, the input is printed unchanged.
+
+## Golden outputs (tests/expected)
+
+Every `tests/inputs/*.sv` has its formatted output in `tests/expected/`.
+`format_inputs` fails if an input has no golden file or its output differs.
+To add a case: put the file in `tests/inputs/`, run
+`tests/update_expected.sh build-dev/svfmt`, check the new file in
+`tests/expected/` by eye, and commit both. After an intended formatting
+change, re-run the script and review the diff in git.

@@ -58,7 +58,8 @@ if(SVFMT_BUILD_TESTS)
   enable_testing()
   add_test(NAME format_inputs
            COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_format_inputs.sh $<TARGET_FILE:svfmt>
-                   ${CMAKE_CURRENT_SOURCE_DIR}/tests/inputs)
+                   ${CMAKE_CURRENT_SOURCE_DIR}/tests/inputs
+                   ${CMAKE_CURRENT_SOURCE_DIR}/tests/expected)
 endif()
 
 if(SVFMT_BUILD_TESTS)
