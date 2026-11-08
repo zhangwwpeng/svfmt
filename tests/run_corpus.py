@@ -95,10 +95,8 @@ def check(idx_path):
             res['safety'] = 'semantic_change'
             res['detail'] = lout.decode(errors='replace')
         else:
-            # The copy lives elsewhere: let it find the original's `include files.
             rc2, out2, err2 = run([svfmt, '--failsafe_success=false', '--verify_convergence=false',
-                                   *flags, '--incdir=' + os.path.dirname(os.path.abspath(path)),
-                                   tmp])
+                                   *flags, tmp])
             res['formatted2'] = out2
             if rc2 != 0 or out2 != out:
                 res['safety'] = 'not_idempotent'
