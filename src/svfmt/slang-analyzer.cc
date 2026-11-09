@@ -2095,6 +2095,10 @@ absl::StatusOr<std::unique_ptr<SlangAnalyzer>> SlangAnalyzer::Analyze(
     // slang only accepts as statements.
     auto retry = attempt(statements);
     if (retry.ok()) return retry;
+    // Class items ("rand bit x;", "constraint c { ... }", methods with
+    // qualifiers) are not module items.
+    auto class_retry = attempt(&kParseModes[1]);
+    if (class_retry.ok()) return class_retry;
   }
   return result;
 }
