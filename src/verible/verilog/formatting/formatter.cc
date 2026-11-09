@@ -351,12 +351,14 @@ struct BranchWrapper {
   std::string_view closing;     // one line before "endmodule", if any
 };
 
-// Module items; port connections of an instance; statements in a block.
+// Module items; port connections of an instance; statements in a block;
+// case items.
 constexpr BranchWrapper kBranchWrappers[] = {
     {"module __svfmt_branch__;\n", "", ""},
     // The trailing comment keeps the port list on several lines.
     {"module __svfmt_branch__;\nfoo __svfmt_branch_inst__ ( // svfmt\n", "foo __svfmt_branch_inst__ (", ");"},
     {"module __svfmt_branch__;\ninitial begin\n", "initial begin", "end"},
+    {"module __svfmt_branch__;\ninitial case (__svfmt_branch__)\n", "initial case", "endcase"},
 };
 
 // Formats `branch` (the text of one inactive branch) and returns it with its

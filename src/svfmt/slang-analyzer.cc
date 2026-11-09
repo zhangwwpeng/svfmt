@@ -1146,13 +1146,43 @@ class SlangAnalyzer::Builder {
     // token with their elements here, so directives stay inside lists.
     Token first = child->getFirstToken();
     // "`A, `B: ..." : a macro that expands to the first case item expression
-    // stays with the expressions.
-    const bool keep_inside = child->kind == SyntaxKind::StandardCaseItem && first &&
-                             first.location().buffer() != buffer_;
-    if (keep_inside) first = Token();
+    // stays with the expressions; "`W'b0": the size stays with the literal.
+    Token macro_name;
+    const bool keep_inside = (child->kind == SyntaxKind::StandardCaseItem ||
+                              slang::syntax::ExpressionSyntax::isKind(child->kind)) &&
+                             first && first.location().buffer() != buffer_ &&
+                             OnlyMacroUsageBefore(first, macro_name);
+    if (keep_inside) {
+      // What precedes the macro call ("`ifdef X", comments) stays outside.
+      // Only once, at the case item: nested expressions share the macro.
+      if (child->kind == SyntaxKind::StandardCaseItem && macro_name &&
+          macro_name.location().buffer() == buffer_) {
+        EmitTrivia(macro_name, out);
+      }
+      first = Token();
+    }
     if (first && !SameToken(first, parent_first_.back())) EmitTrivia(first, out);
     // "`MACRO(...);" where the macro expanded to nothing: slang sees an empty
     // item/statement. Keep the ';' with the macro call.
+    // "foreach (x) `M(a);": the macro is the end of the previous statement.
+    if (child->kind == SyntaxKind::EmptyStatement && !out.empty() && out.back() &&
+        out.back()->Kind() == verible::SymbolKind::kNode &&
+        out.back()->Tag().tag != static_cast<int>(SyntaxKind::MacroUsage)) {
+      if (SyntaxTreeNode *usage = TrailingMacroUsage(verible::SymbolCastToNode(*out.back()))) {
+        Token semi = child->getLastToken();
+        EmitTrivia(semi, *usage);
+        bool same_line = true;
+        for (auto it = tokens_.rbegin(); it != tokens_.rend(); ++it) {
+          const int e = it->token_enum();
+          if (e == TK_NEWLINE) same_line = false;
+          if (e != TK_NEWLINE && e != TK_SPACE && e != TK_EOL_COMMENT && e != TK_COMMENT_BLOCK) break;
+        }
+        if (std::string_view text = TokenAtCursor(semi); !text.empty() && same_line) {
+          usage->AppendChild(std::make_unique<SyntaxTreeLeaf>(Emit(';', text)));
+          return;
+        }
+      }
+    }
     if ((child->kind == SyntaxKind::EmptyMember || child->kind == SyntaxKind::EmptyStatement) &&
         !out.empty() && out.back() && out.back()->Kind() == verible::SymbolKind::kNode &&
         out.back()->Tag().tag == static_cast<int>(SyntaxKind::MacroUsage)) {
@@ -1189,6 +1219,33 @@ class SlangAnalyzer::Builder {
       return;
     }
     out.AppendChild(std::move(converted));
+  }
+
+  // Whether the only directives in front of `tok` are macro calls (other
+  // directives are hoisted out of the node as usual). Sets `name` to the
+  // first macro call's name token.
+  bool OnlyMacroUsageBefore(const Token &tok, Token &name) const {
+    for (const slang::parsing::Trivia &t : tok.trivia()) {
+      if (t.kind == slang::parsing::TriviaKind::DisabledText) return false;
+      if (t.kind != slang::parsing::TriviaKind::Directive) continue;
+      if (t.syntax()->kind != SyntaxKind::MacroUsage) return false;
+      if (!name) name = t.syntax()->getFirstToken();
+    }
+    return true;
+  }
+
+  // The macro call that ends `node` ("foreach (x) `M(a)"), if any.
+  static SyntaxTreeNode *TrailingMacroUsage(SyntaxTreeNode &node) {
+    SyntaxTreeNode *n = &node;
+    while (true) {
+      if (n->Tag().tag == static_cast<int>(SyntaxKind::MacroUsage)) return n;
+      verible::Symbol *last = nullptr;
+      for (auto &c : n->mutable_children()) {
+        if (c && HasLeaf(*c)) last = c.get();
+      }
+      if (last == nullptr || last->Kind() != verible::SymbolKind::kNode) return nullptr;
+      n = &verible::SymbolCastToNode(*last);
+    }
   }
 
   // Whether a newline separates the last emitted token from the previous
@@ -1482,6 +1539,29 @@ bool InConstraintBody(std::string_view text, size_t pos) {
   return false;
 }
 
+// Whether `pos` is in a covergroup body: the nearest keyword before it is
+// "covergroup", not "endgroup".
+bool InCovergroup(std::string_view text, size_t pos) {
+  const auto last_word = [&](std::string_view word) -> size_t {
+    for (size_t at = text.rfind(word, pos); at != std::string_view::npos;
+         at = at == 0 ? std::string_view::npos : text.rfind(word, at - 1)) {
+      const bool left = at == 0 || !IsIdentChar(text[at - 1]);
+      const bool right = at + word.size() >= text.size() || !IsIdentChar(text[at + word.size()]);
+      // Not in a "// ..." comment.
+      const size_t line = text.rfind('\n', at);
+      const size_t line_start = line == std::string_view::npos ? 0 : line + 1;
+      const bool commented =
+          text.substr(line_start, at - line_start).find("//") != std::string_view::npos;
+      if (left && right && !commented) return at;
+    }
+    return std::string_view::npos;
+  };
+  const size_t open = last_word("covergroup");
+  if (open == std::string_view::npos) return false;
+  const size_t close = last_word("endgroup");
+  return close == std::string_view::npos || close < open;
+}
+
 // End of the code before `pos`: skips whitespace, "// ..." line comments and
 // "/* ... */" block comments (a '/' in "////" is not a division).
 size_t PreviousCodeEnd(std::string_view text, size_t pos) {
@@ -1553,6 +1633,63 @@ bool DeclaresName(std::string_view text, size_t end) {
 // expressions (e.g. "`uvm_object_new" in a class body) expands to nothing
 // instead. Expansions never reach the output: only the macro call text is
 // formatted.
+// Whether the code ending at `p` heads a statement body: "foreach (...)",
+// "for (...)", "while (...)", "repeat (...)", "else", "forever". Not "if (...)"
+// or "do": "if (c) `M(a); else" needs the ';' to end the body.
+bool ControlsStatement(std::string_view text, size_t p) {
+  const auto word_before = [&](size_t end) {
+    size_t w = end;
+    while (w > 0 && IsIdentChar(text[w - 1])) --w;
+    return text.substr(w, end - w);
+  };
+  if (IsIdentChar(text[p - 1])) {
+    const std::string_view word = word_before(p);
+    // Not the directive "`else".
+    const size_t w = p - word.size();
+    if (w > 0 && text[w - 1] == '`') return false;
+    return word == "else" || word == "forever";
+  }
+  if (text[p - 1] != ')') return false;
+  int depth = 0;
+  for (size_t i = p; i-- > 0;) {
+    if (text[i] == ')') ++depth;
+    else if (text[i] == '(' && --depth == 0) {
+      const size_t q = PreviousCodeEnd(text, i);
+      const std::string_view word = word_before(q);
+      return word == "foreach" || word == "for" || word == "while" || word == "repeat";
+    }
+  }
+  return false;
+}
+
+// Whether the ')' ending at `p` closes "if (...)".
+bool IfHeaderEnd(std::string_view text, size_t p) {
+  int depth = 0;
+  for (size_t i = p; i-- > 0;) {
+    if (text[i] == ')') ++depth;
+    else if (text[i] == '(' && --depth == 0) {
+      const size_t q = PreviousCodeEnd(text, i);
+      return q >= 2 && text.substr(q - 2, 2) == "if" && (q == 2 || !IsIdentChar(text[q - 3]));
+    }
+  }
+  return false;
+}
+
+// Whether `pos` is directly inside "@( ... )".
+bool InEventControl(std::string_view text, size_t pos) {
+  int depth = 0;
+  for (size_t i = pos; i-- > 0;) {
+    if (text[i] == ')') ++depth;
+    else if (text[i] == '(' && depth-- == 0) {
+      const size_t q = PreviousCodeEnd(text, i);
+      return q > 0 && text[q - 1] == '@';
+    } else if (text[i] == ';') {
+      return false;
+    }
+  }
+  return false;
+}
+
 std::vector<std::string> StubDefinitions(std::string_view text,
                                          const std::vector<size_t> &usage_offsets,
                                          bool items_empty) {
@@ -1567,6 +1704,8 @@ std::vector<std::string> StubDefinitions(std::string_view text,
     bool operand = false;       // some use is followed by an operator
     bool size = false;          // used as the size of a based literal
     bool assertion = false;     // followed by "property" / "sequence"
+    bool body = false;          // the body of a loop / else
+    bool if_body = false;       // "if (c) `M(a); else": the ';' ends the body
     bool trailing = false;      // follows a complete list element
   };
   std::map<std::string, Info> infos;
@@ -1612,8 +1751,9 @@ std::vector<std::string> StubDefinitions(std::string_view text,
       while (q < text.size() && std::isspace(static_cast<unsigned char>(text[q]))) ++q;
       if (q >= text.size() || text[q] != ';') info.no_semicolon = true;
       // "`M(x) < y": an operand of an operator.
+      // "`M(x)\n -> ev;" is an event trigger statement, not an operator.
       if (q < text.size() && std::strchr("<>=!+-*/%&|^?.[", text[q]) &&
-          text.substr(q, 2) != "//" && text.substr(q, 2) != "/*") {
+          text.substr(q, 2) != "//" && text.substr(q, 2) != "/*" && text.substr(q, 2) != "->") {
         info.expression = true;
         info.operand = true;
       }
@@ -1668,6 +1808,14 @@ std::vector<std::string> StubDefinitions(std::string_view text,
         // complete operand, so it expands to nothing here.
         const bool keyword = word == "begin" || word == "else" || word.starts_with("end");
         if (!keyword && (w == 0 || text[w - 1] != '`')) after_operand = true;
+        // "@(posedge clk `OR_RST)": an argument-less macro that adds to an
+        // event list after a plain name.
+        static const std::set<std::string_view> kEdges = {"posedge", "negedge", "edge", "or"};
+        if (call_end == end && !keyword && !kEdges.count(word) && (w == 0 || text[w - 1] != '`') &&
+            InEventControl(text, offset)) {
+          const size_t next = NextCodeStart(text, end);
+          if (next < text.size() && text[next] == ')') info.trailing = true;
+        }
       }
       if (operand_ends.count(p)) after_operand = true;
       // "- (a + b) `M(x)": a parenthesized operand.
@@ -1684,6 +1832,25 @@ std::vector<std::string> StubDefinitions(std::string_view text,
       }
       // A value ("= `CFG", "= `CLOG2(n)") ends an operand too.
       if (kExprChars.find(c) != std::string_view::npos) operand_ends.insert(call_end);
+    }
+    // "foreach (x[i]) `M(a);": the body of a control statement must be a
+    // statement, so the macro is one.
+    if (p > 0 && ControlsStatement(text, p)) info.body = true;
+    if (p > 0 && text[p - 1] == ')' && IfHeaderEnd(text, p)) {
+      const size_t semi = NextCodeStart(text, call_end);
+      if (semi < text.size() && text[semi] == ';') {
+        const size_t after = NextCodeStart(text, semi + 1);
+        if (text.substr(after, 4) == "else" &&
+            (after + 4 >= text.size() || !IsIdentChar(text[after + 4]))) {
+          info.if_body = true;
+        }
+      }
+    }
+    // A covergroup item ("`SEEN(a, b)" between coverpoints): ';' is not a
+    // covergroup member, nothing is.
+    if (call_end != end && (p == 0 || std::strchr(";)}{", text[p - 1])) &&
+        InCovergroup(text, offset)) {
+      info.trailing = true;
     }
     if (after_operand && call_end != end) {
       const size_t next = NextCodeStart(text, call_end);
@@ -1725,6 +1892,7 @@ std::vector<std::string> StubDefinitions(std::string_view text,
       def += ')';
     }
     if (info.assertion) def += " assert";
+    else if (info.body && !info.if_body && !info.expression && !info.member) def += " begin end";
     else if (info.member) def += info.no_semicolon ? " int __svfmt_macro__;" : " int __svfmt_macro__";
     else if (info.literal || info.size) def += info.size ? " 8" : " 0";
     // A constraint item: a constant expression is a valid one.

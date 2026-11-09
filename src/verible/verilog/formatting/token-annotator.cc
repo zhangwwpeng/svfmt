@@ -933,6 +933,12 @@ static WithReason<SpacingOptions> BreakDecisionBetween(
   if (right.TokenEnum() == ',' && left.TokenEnum() == MacroIdentifier) {
     return {SpacingOptions::kMustAppend, "Keep ',' with the preceding macro."};
   }
+  // svfmt: "`W'b0": the macro is the size of the literal.
+  if (left.TokenEnum() == MacroIdentifier &&
+      (right.TokenEnum() == TK_BinBase || right.TokenEnum() == TK_OctBase ||
+       right.TokenEnum() == TK_DecBase || right.TokenEnum() == TK_HexBase)) {
+    return {SpacingOptions::kMustAppend, "Keep a macro size with its based literal."};
+  }
 
   // svfmt: inactive branch text starts its own line.
   if (right.TokenEnum() == svfmt::TK_SVFMT_DISABLED_TEXT &&

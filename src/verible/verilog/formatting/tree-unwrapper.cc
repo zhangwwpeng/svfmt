@@ -1496,7 +1496,14 @@ void TreeUnwrapper::SetIndentationsForOtherKinds(const SyntaxTreeNode &node,
            parent == Tag(ListKind::GenerateBlock_members) ||
            IsBlockItemList(parent)) &&
           !svfmt::IsInside(Context(), SyntaxKind::VariableDimension);
-      if (is_nested_call && HasContextHint(ContextHint::kInsideStandaloneMacroCall)) {
+      // An argument-less macro inside a construct (not an item of a list) is
+      // just a token: "`W'b0", "@(posedge clk `OR_RST)".
+      const bool is_value = !is_standalone_call && node.size() == 1 && node.front() &&
+                            node.front()->Kind() == verible::SymbolKind::kLeaf &&
+                            !svfmt::IsListTag(parent) && !svfmt::IsGroupTag(parent);
+      if (is_value) {
+        TraverseChildren(node);
+      } else if (is_nested_call && HasContextHint(ContextHint::kInsideStandaloneMacroCall)) {
         VisitIndentedSection(node, indent, PartitionPolicyEnum::kStack);
       } else if (is_standalone_call) {
         PushContextHint(ContextHint::kInsideStandaloneMacroCall);
@@ -2757,7 +2764,15 @@ static void MergeLeadingLeafPartitions(TokenPartitionTree *partition) {
   auto &children = partition->Children();
   size_t k = 0;
   while (k < children.size() && is_leaf(children[k])) ++k;
-  if (k == children.size()) return;  // no port list
+  if (k == children.size()) {
+    // A port list of one port may be a leaf too ("f(P)" in the return type
+    // splits the header): the header ends at the last opening paren.
+    k = 0;
+    for (size_t i = 0; i + 1 < children.size(); ++i) {
+      if (PartitionEndsWithOpenParen(children[i])) k = i + 1;
+    }
+    if (k == 0) return;  // no port list
+  }
   for (size_t i = k; i-- > 1;) verible::MergeLeafIntoPreviousLeaf(&children[i]);
 }
 
