@@ -14,9 +14,7 @@ endmodule
 
 `define TRY(a, b) if (1 != $cast(a, b)) $stop
 module `CELL_NAME
-  (
-    input a
-);
+  (input a);
   `CELL_NAME u (.a(a));
   initial begin
     `TRY(x, y);

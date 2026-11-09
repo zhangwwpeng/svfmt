@@ -325,8 +325,12 @@ static bool IgnoreMultilineCaseStatements(const TokenPartitionTree &partition) {
   const auto token_range = uwline.TokensRange();
 
   // Scan for any tokens that would force a line break.
-  return std::any_of(token_range.begin(), token_range.end(),
-                     &TokenForcesLineBreak);
+  if (std::any_of(token_range.begin(), token_range.end(), &TokenForcesLineBreak)) return true;
+  // svfmt: an EOL comment before the end ("label:  // c" then the statement)
+  // also puts the item on several lines.
+  return std::any_of(token_range.begin(), token_range.end() - 1, [](const PreFormatToken &t) {
+    return t.TokenEnum() == verilog_tokentype::TK_EOL_COMMENT;
+  });
 }
 
 // svfmt: the column scanners below are rewritten for the slang-derived CST.
@@ -1110,8 +1114,10 @@ static void non_tree_column_scanner(
   if (comment_it != trailing_tokens.end() &&
       (comment_it->token->token_enum() == TK_COMMENT_BLOCK ||
        comment_it->token->token_enum() == TK_EOL_COMMENT)) {
+    AlignmentColumnProperties comment_column = FlushLeft;
+    comment_column.needs_two_rows = true;
     const verible::ColumnPositionEntry column{kTrailingCommentPath,
-                                              *comment_it->token, FlushLeft};
+                                              *comment_it->token, comment_column};
     column_entries->Children().emplace_back(column);
   }
 }

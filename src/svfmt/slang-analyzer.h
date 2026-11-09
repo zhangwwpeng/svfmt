@@ -59,6 +59,9 @@ struct ParseMode;
 struct AnalyzerOptions {
   std::vector<std::string> include_dirs;
   std::vector<std::string> defines;
+  // Tabs (outside comments and strings) become spaces up to the next
+  // multiple of this column; svfmt sets it to the indentation width.
+  int tab_width = 1;
   // Set internally: stub `define lines generated for unknown macros, parsed
   // from a buffer ahead of the main one.
   std::vector<std::string> stubbed_macros;

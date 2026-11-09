@@ -1196,6 +1196,34 @@ Status Formatter::Format(const ExecutionControl &control) {
     }
   }
 
+  // svfmt: "x.randomize(a) with {": a short argument list stays on the line
+  // of the call and "with {" (the constraint block below always expands, which
+  // would otherwise put "a" and ") with {" on lines of their own).
+  tree_unwrapper.ApplyPreOrder([&](TokenPartitionTree &node) {
+    auto &children = node.Children();
+    for (size_t i = 0; i + 2 < children.size(); ++i) {
+      // The arguments may be one partition per argument.
+      const auto &args = children[i + 1].Children();
+      const bool flat_args = std::all_of(args.begin(), args.end(),
+                                         [](const TokenPartitionTree &a) { return is_leaf(a); });
+      if (!is_leaf(children[i]) || !flat_args || !is_leaf(children[i + 2])) continue;
+      const auto open = children[i].Value().TokensRange();
+      const auto close = children[i + 2].Value().TokensRange();
+      if (open.empty() || close.size() < 3 || open.back().TokenEnum() != '(' ||
+          close.front().TokenEnum() != ')' || close.back().TokenEnum() != '{' ||
+          close[close.size() - 2].TokenEnum() != verilog_tokentype::TK_with) {
+        continue;
+      }
+      const UnwrappedLine &first = children[i].Value();
+      UnwrappedLine joined(first.IndentationSpaces(), open.begin(), first.PartitionPolicy());
+      joined.SpanUpToToken(close.end());
+      if (!verible::FitsOnLine(joined, style_).fits) continue;
+      children[i + 1].Children().clear();
+      verible::MergeConsecutiveSiblings(&node, i);
+      verible::MergeConsecutiveSiblings(&node, i);
+    }
+  });
+
   {  // In this pass, perform additional modifications to the partitions and
      // spacings.
     tree_unwrapper.ApplyPreOrder([&](TokenPartitionTree &node) {
@@ -1288,6 +1316,19 @@ Status Formatter::Format(const ExecutionControl &control) {
       }
       // Arbitrarily choose the first solution, if there are multiple.
       formatted_lines_.push_back(optimal_solutions.front());
+      if (!formatted_lines_.back().CompletedFormatting() && style_.try_wrap_long_lines) {
+        // svfmt: a long line that could not be wrapped within the search
+        // limit keeps its original spacing, as without try_wrap_long_lines,
+        // instead of failing the whole file.
+        verible::FormattedExcerpt preserved(uwline);
+        auto &tokens = preserved.MutableTokens();
+        for (size_t i = 1; i < tokens.size(); ++i) {
+          if (tokens[i].before.preserved_space_start != verible::string_view_null_iterator()) {
+            tokens[i].before.action = verible::SpacingDecision::kPreserve;
+          }
+        }
+        formatted_lines_.back() = preserved;
+      }
       if (!formatted_lines_.back().CompletedFormatting()) {
         // Copy over any lines that did not finish wrap searching.
         partially_formatted_lines.push_back(&uwline);
@@ -1311,6 +1352,20 @@ Status Formatter::Format(const ExecutionControl &control) {
       }
       before.action = verible::SpacingDecision::kWrap;
       before.spaces = line.IndentationSpaces();
+    }
+  }
+  // svfmt: outside a format-off range, the first token of a line is printed
+  // after the line's indentation; a preserved spacing decision there would
+  // drop the indentation (e.g. the right side of "a ->" moved to its own
+  // line lands in column 0).
+  for (auto &line : formatted_lines_) {
+    auto &tokens = line.MutableTokens();
+    if (tokens.empty()) continue;
+    auto &front = tokens.front();
+    if (front.before.action == verible::SpacingDecision::kPreserve &&
+        !disabled_ranges_.Contains(front.token->left(full_text))) {
+      front.before.action = verible::SpacingDecision::kAppend;
+      front.before.spaces = 0;
     }
   }
   // svfmt: an escaped identifier ends at whitespace; "\\a ," must not

@@ -50,6 +50,11 @@ struct AlignmentColumnProperties {
 
   bool contains_delimiter = false;
 
+  // svfmt: a top-level column that is dropped unless at least two rows of the
+  // group have it (e.g. trailing comments: a lone comment is not pushed to
+  // the end of the widest row).
+  bool needs_two_rows = false;
+
   AlignmentColumnProperties() = default;
 
   explicit constexpr AlignmentColumnProperties(bool flush_left)

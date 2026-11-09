@@ -936,7 +936,26 @@ AlignablePartitionGroup::CalculateAlignmentSpacings(
 
     alignment_row_data.emplace_back(row_data);
     VLOG(2) << "Row sparse columns:\n" << row_data.sparse_columns;
-
+  }
+  // svfmt: drop needs_two_rows columns that fewer than two rows have.
+  {
+    std::map<SyntaxTreePath, int> counts;
+    for (const auto &row : alignment_row_data) {
+      for (const auto &column : row.sparse_columns.Children()) {
+        if (column.Value().properties.needs_two_rows) ++counts[column.Value().path];
+      }
+    }
+    for (auto &row : alignment_row_data) {
+      auto &columns = row.sparse_columns.Children();
+      columns.erase(std::remove_if(columns.begin(), columns.end(),
+                                   [&counts](const ColumnPositionTree &column) {
+                                     return column.Value().properties.needs_two_rows &&
+                                            counts[column.Value().path] < 2;
+                                   }),
+                    columns.end());
+    }
+  }
+  for (const auto &row_data : alignment_row_data) {
     // Aggregate union of all column keys (syntax tree paths).
     column_schema.Collect(row_data.sparse_columns);
   }

@@ -97,3 +97,26 @@ module struct_param_rows;
     rvfi_probes_instr_t instr;
   };
 endmodule
+
+// a parameter or port list with at most one element stays on one line when
+// it fits; any longer list expands the whole header
+class one_param_c #(type T=int);
+endclass
+class one_named_c extends cip_base_env_cfg #(.RAL_T(rram_ctrl_core_reg_block));
+endclass
+class two_param_c #(type T=int, int W=8) extends base #(T);
+endclass
+module one_each #(parameter W=8) (input a);
+  foo #(.W(8)) u (.a(a));
+  foo u2 (.a(a), .b(b));
+endmodule
+module one_param_two_ports #(parameter W=8) (input a, output b);
+endmodule
+module no_ports #(parameter W = 8) ();
+endmodule
+module commented_port (
+  input clk  // the clock
+);
+endmodule
+module long_one #(parameter int unsigned SOME_VERY_LONG_PARAMETER_NAME_THAT_IS_REALLY_LONG = 32'd12345678) (input logic clk_with_a_long_name);
+endmodule

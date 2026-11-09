@@ -195,6 +195,32 @@ static bool IsCaseItemKind(SyntaxKind k) {
          k == SyntaxKind::PatternCaseItem;
 }
 
+// svfmt: a parameter or port list with a single element stays on its line
+// when it fits ("class c #(type T = int);"); Verible always expands it.
+static PartitionPolicyEnum ListPolicy(const verible::SyntaxTreeNode &list) {
+  const auto elements = std::count_if(list.children().begin(), list.children().end(),
+                                      [](const verible::SymbolPtr &p) {
+                                        return p && p->Kind() == verible::SymbolKind::kNode;
+                                      });
+  return elements <= 1 ? PartitionPolicyEnum::kFitOnLineElseExpand
+                       : PartitionPolicyEnum::kTabularAlignment;
+}
+
+// True if a module or class header has a parameter or port list with more
+// than one element; the header is then expanded, one element per line.
+static bool HeaderHasLongList(const verible::Symbol &header) {
+  return verible::FindFirstSubtree(&header, [](const verible::Symbol &s) {
+           const int tag = s.Tag().tag;
+           if (tag != static_cast<int>(ListKind::ParameterPortList_declarations) &&
+               tag != static_cast<int>(ListKind::AnsiPortList_ports) &&
+               tag != static_cast<int>(ListKind::NonAnsiPortList_ports)) {
+             return false;
+           }
+           return ListPolicy(verible::SymbolCastToNode(s)) !=
+                  PartitionPolicyEnum::kFitOnLineElseExpand;
+         }) != nullptr;
+}
+
 // Statement kinds that Verible handles under search-anchor STATEMENT_TYPES.
 static bool IsStatementKind(SyntaxKind k) {
   switch (k) {
@@ -244,6 +270,16 @@ static bool IsStatementKind(SyntaxKind k) {
 static bool IsTopLevelConcatenation(const verible::SyntaxTreeContext &context) {
   if (svfmt::IsInsideAnyOf(context, {SyntaxKind::CoverageBins,
                                      SyntaxKind::ConditionalExpression})) {
+    return false;
+  }
+  // svfmt: the expression of "case ({a, b})" and the labels of its items
+  // ("{a, b}: x = 1;") stay inline; statements of the items are not affected.
+  if (svfmt::IsInsideFirstIf(
+          context,
+          [](SyntaxKind k) {
+            return k == SyntaxKind::CaseStatement || k == SyntaxKind::StandardCaseItem;
+          },
+          [](SyntaxKind k) { return IsStatementKind(k) && k != SyntaxKind::CaseStatement; })) {
     return false;
   }
   return !svfmt::IsInsideIf(context, svfmt::IsVerilogBinaryExpressionKind);
@@ -546,6 +582,10 @@ static bool ShouldIndentRelativeToDirectParent(
     case SyntaxKind::AlwaysLatchBlock:
     case SyntaxKind::FinalBlock:
     case SyntaxKind::RsCodeBlock:
+    // svfmt: the statement of a case item on the line after its label.
+    case SyntaxKind::StandardCaseItem:
+    case SyntaxKind::DefaultCaseItem:
+    case SyntaxKind::PatternCaseItem:
       return true;
     default:
       // kIfClause in Verible.
@@ -962,6 +1002,14 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
                              PartitionPolicyEnum::kAlwaysExpand);
         return;
 
+      // svfmt: the body of a coverpoint or cross, one level in.
+      case ListKind::Coverpoint_members:
+      case ListKind::CoverCross_members: {
+        const int indent = suppress_indentation ? 0 : style_.indentation_spaces;
+        VisitIndentedSection(node, indent, PartitionPolicyEnum::kAlwaysExpand);
+        return;
+      }
+
       // kConstraintBlockItemList, kCoverageSpecOptionList, ...
       case ListKind::ConstraintBlock_items:
       case ListKind::CovergroupDeclaration_members:
@@ -982,7 +1030,7 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
         if (!named) break;
         const int indent =
             suppress_indentation ? 0 : style_.NamedParameterIndentation();
-        VisitIndentedSection(node, indent, PartitionPolicyEnum::kTabularAlignment);
+        VisitIndentedSection(node, indent, ListPolicy(node));
         return;
       }
 
@@ -993,8 +1041,7 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
         // kDataDeclaration).
         const bool gate = AncestorKind(Context(), 1) == SyntaxKind::PrimitiveInstantiation;
         VisitIndentedSection(node, indent,
-                             gate ? PartitionPolicyEnum::kFitOnLineElseExpand
-                                  : PartitionPolicyEnum::kTabularAlignment);
+                             gate ? PartitionPolicyEnum::kFitOnLineElseExpand : ListPolicy(node));
         return;
       }
 
@@ -1013,7 +1060,7 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
         if (svfmt::IsInsideAnyOf(Context(), {SyntaxKind::ModuleHeader,
                                              SyntaxKind::InterfaceHeader,
                                              SyntaxKind::ProgramHeader})) {
-          VisitIndentedSection(node, indent, PartitionPolicyEnum::kTabularAlignment);
+          VisitIndentedSection(node, indent, ListPolicy(node));
         } else {
           VisitIndentedSection(node, indent, PartitionPolicyEnum::kFitOnLineElseExpand);
         }
@@ -1028,7 +1075,7 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
                                              SyntaxKind::InterfaceHeader,
                                              SyntaxKind::ProgramHeader}) ||
             svfmt::IsInside(Context(), G(GroupKind::kClassHeader))) {
-          VisitIndentedSection(node, indent, PartitionPolicyEnum::kTabularAlignment);
+          VisitIndentedSection(node, indent, ListPolicy(node));
         } else {
           VisitIndentedSection(node, indent, PartitionPolicyEnum::kFitOnLineElseExpand);
         }
@@ -1105,8 +1152,12 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
         return;
       case GroupKind::kBegin:
       case GroupKind::kEnd:
-      case GroupKind::kClassHeader:
         VisitIndentedSection(node, 0, PartitionPolicyEnum::kAlwaysExpand);
+        return;
+      case GroupKind::kClassHeader:
+        VisitIndentedSection(node, 0,
+                             HeaderHasLongList(node) ? PartitionPolicyEnum::kAlwaysExpand
+                                                     : PartitionPolicyEnum::kFitOnLineElseExpand);
         return;
       // Verible's kAssertionVariableDeclarationList and kPropertySpec /
       // kSequenceDeclarationFinalExpr: one level in, one item per line.
@@ -1538,8 +1589,20 @@ void TreeUnwrapper::SetIndentationsForOtherKinds(const SyntaxTreeNode &node,
 
     case SyntaxKind::Coverpoint:
     case SyntaxKind::CoverCross: {
+      // svfmt: a body with more than one member is expanded, as for
+      // constraint blocks.
+      const int members_tag = Tag(Kind(node) == SyntaxKind::Coverpoint
+                                      ? ListKind::Coverpoint_members
+                                      : ListKind::CoverCross_members);
+      const auto *members = FindChildNode(node, members_tag);
+      const bool long_body =
+          members != nullptr &&
+          std::count_if(members->children().begin(), members->children().end(),
+                        [](const verible::SymbolPtr &p) {
+                          return p && p->Kind() == verible::SymbolKind::kNode;
+                        }) > 1;
       VisitIndentedSection(node, 0,
-                           style_.expand_coverpoints
+                           style_.expand_coverpoints || long_body
                                ? PartitionPolicyEnum::kAlwaysExpand
                                : PartitionPolicyEnum::kFitOnLineElseExpand);
       break;
@@ -1963,11 +2026,18 @@ static void ReshapeElseClause(const SyntaxTreeNode &node,
   if (!next_leaf || PartitionIsForcedIntoNewLine(*next_leaf)) return;
 
   const auto *next_origin = next_leaf->Value().Origin();
-  if (!next_origin ||
-      !(next_origin->Tag() == verible::NodeTag(GroupKind::kBegin) ||
-        next_origin->Tag() == verible::LeafTag(verilog_tokentype::TK_begin) ||
-        next_origin->Tag() == verible::NodeTag(GroupKind::kIfHeader) ||
-        next_origin->Tag() == verible::LeafTag(verilog_tokentype::TK_if))) {
+  // svfmt: a hoisted "if (b) begin" line can have the whole conditional as
+  // its origin; its first token tells.
+  const auto next_tokens = next_leaf->Value().TokensRange();
+  const bool starts_if_or_begin =
+      !next_tokens.empty() && (next_tokens.front().TokenEnum() == verilog_tokentype::TK_if ||
+                               next_tokens.front().TokenEnum() == verilog_tokentype::TK_begin);
+  if (!starts_if_or_begin &&
+      (!next_origin ||
+       !(next_origin->Tag() == verible::NodeTag(GroupKind::kBegin) ||
+         next_origin->Tag() == verible::LeafTag(verilog_tokentype::TK_begin) ||
+         next_origin->Tag() == verible::NodeTag(GroupKind::kIfHeader) ||
+         next_origin->Tag() == verible::LeafTag(verilog_tokentype::TK_if)))) {
     return;
   }
 
@@ -2719,6 +2789,12 @@ static void HandleDataDeclaration(const SyntaxTreeNode &node,
     }
     verible::AdjustIndentationRelative(&instance_list_partition,
                                        -style.wrap_spaces);
+    // svfmt: qualifiers ("const", "static", "var") join the type, so that
+    // "const type_t a[] = {" stays one line like "type_t a[] = {".
+    while (children.size() > 2 && is_leaf(children.front()) &&
+           !PartitionIsAllComments(children.front())) {
+      verible::MergeLeafIntoNextLeaf(&children.front());
+    }
     auto *instance_type_partition =
         ABSL_DIE_IF_NULL(PreviousSibling(children.back()));
     if (instance_type_partition == &children.front()) {
@@ -2971,7 +3047,8 @@ void TreeUnwrapper::ReshapeTokenPartitions(
           }
         }
         // If there were any parameters or ports at all, expand.
-        if (partition.Children().size() > 2) {
+        // svfmt: unless each list has a single element (then fit on a line).
+        if (partition.Children().size() > 2 && HeaderHasLongList(node)) {
           partition.Value().SetPartitionPolicy(PartitionPolicyEnum::kAlwaysExpand);
         }
         break;
@@ -3203,7 +3280,10 @@ void TreeUnwrapper::ReshapeTokenPartitions(
         const auto *body = LastChildNode(node);
         if (body != nullptr && partition.Children().size() > 1 &&
             (Kind(*body) == SyntaxKind::TimingControlStatement ||
-             Kind(*body) == SyntaxKind::SequentialBlockStatement)) {
+             Kind(*body) == SyntaxKind::SequentialBlockStatement ||
+             // svfmt: "always forever begin"
+             (Kind(*body) == SyntaxKind::ForeverStatement && LastChildNode(*body) != nullptr &&
+              NodeIsBeginEndBlock(*LastChildNode(*body))))) {
           // Merge 'always' keyword with next sibling, and adjust subtree indent.
           verible::MergeLeafIntoNextLeaf(&partition.Children().front());
           verible::AdjustIndentationAbsolute(&partition.Children().front(),

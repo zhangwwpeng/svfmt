@@ -28,6 +28,7 @@
 #include <string_view>
 #include <vector>
 
+#include "absl/flags/declare.h"
 #include "absl/flags/flag.h"
 #include "absl/flags/usage.h"
 #include "absl/status/status.h"
@@ -90,6 +91,8 @@ static std::string AbslUnparseFlag(LineRanges /* unused */) {
 }
 
 // TODO(fangism): Provide -i alias, as it is canonical to many formatters
+ABSL_DECLARE_FLAG(int, indentation_spaces);  // basic-format-style-init.cc
+
 ABSL_FLAG(bool, inplace, false,
           "If true, overwrite the input file on successful conditions.");
 ABSL_FLAG(
@@ -300,6 +303,7 @@ int main(int argc, char **argv) {
   const auto file_args = verible::InitCommandLine(usage, &argc, &argv);
   svfmt::GlobalAnalyzerOptions().include_dirs = absl::GetFlag(FLAGS_incdir);
   svfmt::GlobalAnalyzerOptions().defines = absl::GetFlag(FLAGS_define);
+  svfmt::GlobalAnalyzerOptions().tab_width = absl::GetFlag(FLAGS_indentation_spaces);
 
   if (file_args.size() == 1) {
     std::cerr << absl::ProgramUsageMessage() << std::endl;

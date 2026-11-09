@@ -2014,10 +2014,19 @@ std::vector<std::pair<std::string, std::string>> IncludePlaceholders(
 
 }  // namespace
 
-// Replaces each tab with a space, except inside comments, string literals and
-// "verilog_format: off" regions (kept verbatim). Only whitespace changes.
-std::string TabsToSpaces(std::string_view text) {
-  std::string out(text);
+// Replaces each tab with spaces up to the next multiple of `width`, except
+// inside comments, string literals and "verilog_format: off" regions (kept
+// verbatim). Only whitespace changes.
+std::string TabsToSpaces(std::string_view text, int width) {
+  width = std::max(width, 1);
+  std::string out;
+  out.reserve(text.size());
+  size_t column = 0;  // column of the next character in `out`
+  auto append = [&](std::string_view s) {
+    out.append(s);
+    const size_t nl = s.rfind('\n');
+    column = nl == std::string_view::npos ? column + s.size() : s.size() - nl - 1;
+  };
   size_t i = 0;
   const size_t n = text.size();
   bool off = false;
@@ -2029,19 +2038,26 @@ std::string TabsToSpaces(std::string_view text) {
       const std::string_view comment = text.substr(begin, i - begin);
       if (comment.find("verilog_format: off") != std::string_view::npos) off = true;
       if (comment.find("verilog_format: on") != std::string_view::npos) off = false;
+      append(comment);
     } else if (c == '/' && i + 1 < n && text[i + 1] == '*') {
       const size_t e = text.find("*/", i + 2);
       const size_t end = e == std::string_view::npos ? n : e + 2;
       const std::string_view comment = text.substr(i, end - i);
       if (comment.find("verilog_format: off") != std::string_view::npos) off = true;
       if (comment.find("verilog_format: on") != std::string_view::npos) off = false;
+      append(comment);
       i = end;
     } else if (c == '"') {
+      const size_t begin = i;
       ++i;
       while (i < n && text[i] != '"' && text[i] != '\n') i += text[i] == '\\' ? 2 : 1;
+      i = std::min(i + 1, n);
+      append(text.substr(begin, i - begin));
+    } else if (c == '\t' && !off) {
+      append(std::string(width - column % width, ' '));
       ++i;
     } else {
-      if (c == '\t' && !off) out[i] = ' ';
+      append(text.substr(i, 1));
       ++i;
     }
   }
@@ -2051,7 +2067,7 @@ std::string TabsToSpaces(std::string_view text) {
 absl::StatusOr<std::unique_ptr<SlangAnalyzer>> SlangAnalyzer::Analyze(
     std::string_view text, std::string_view filename, const AnalyzerOptions &options) {
   // Tabs are formatted as spaces (outside comments and strings).
-  const std::string spaced = TabsToSpaces(text);
+  const std::string spaced = TabsToSpaces(text, options.tab_width);
   text = spaced;
   const ParseMode *mode = FindParseMode(ScanParseModeDirective(text));
   // Prefer parsing every `ifdef branch (like Verible); fall back to normal
