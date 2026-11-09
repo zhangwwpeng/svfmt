@@ -205,6 +205,13 @@ static WithReason<int> SpacesRequiredBetween(
     return {1, "Space before inactive branch text."};
   }
 
+  // svfmt: an edge descriptor ("1Z", "x0") is lexed as a number and an
+  // identifier; it is one word.
+  if (svfmt::IsInside(left_context, SyntaxKind::EdgeDescriptor) &&
+      svfmt::IsInside(right_context, SyntaxKind::EdgeDescriptor)) {
+    return {0, "An edge descriptor is one word."};
+  }
+
   // Preserve space after escaped identifiers.
   if (left.TokenEnum() == EscapedIdentifier) {
     return {1, "Escaped identifiers must end with whitespace."};
@@ -932,6 +939,10 @@ static WithReason<SpacingOptions> BreakDecisionBetween(
   // value; breaking before it moves the separator between passes.
   if (right.TokenEnum() == ',' && left.TokenEnum() == MacroIdentifier) {
     return {SpacingOptions::kMustAppend, "Keep ',' with the preceding macro."};
+  }
+  if (svfmt::IsInside(left_context, SyntaxKind::EdgeDescriptor) &&
+      svfmt::IsInside(right_context, SyntaxKind::EdgeDescriptor)) {
+    return {SpacingOptions::kMustAppend, "An edge descriptor is one word."};
   }
   // svfmt: "`W'b0": the macro is the size of the literal.
   if (left.TokenEnum() == MacroIdentifier &&

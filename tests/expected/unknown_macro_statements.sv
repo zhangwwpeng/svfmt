@@ -41,8 +41,7 @@ module spi;
 endmodule
 
 module widths;
-  `rand_reg
-  [63:0] o;
+  `rand_reg [63:0] o;
   reg [`XLEN   - 1:0] a;
   reg [`XLEN/8 - 1:0] b;
 endmodule

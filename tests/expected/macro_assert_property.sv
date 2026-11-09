@@ -1,4 +1,3 @@
 module m;
-  `MYMODE
-  property ((counter < 123456) |=> (counter <= 123456));
+  `MYMODE property ((counter < 123456) |=> (counter <= 123456));
 endmodule

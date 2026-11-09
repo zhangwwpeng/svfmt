@@ -1,7 +1,6 @@
 module m;
   // cell
-  `RV_CELL
-  bank_hi0 (
+  `RV_CELL bank_hi0 (
       .CLK(clk),
       .D  (d)
   );

@@ -1148,14 +1148,21 @@ class SlangAnalyzer::Builder {
     // "`A, `B: ..." : a macro that expands to the first case item expression
     // stays with the expressions; "`W'b0": the size stays with the literal.
     Token macro_name;
-    const bool keep_inside = (child->kind == SyntaxKind::StandardCaseItem ||
+    // "`TYPE [7:0] x;", "`CELL u (...)", "`MODE property ...": a type or
+    // keyword macro stays with its declaration.
+    const bool declares = child->kind == SyntaxKind::DataDeclaration ||
+                          child->kind == SyntaxKind::NetDeclaration ||
+                          child->kind == SyntaxKind::HierarchyInstantiation ||
+                          child->kind == SyntaxKind::ConcurrentAssertionMember ||
+                          slang::syntax::ConcurrentAssertionStatementSyntax::isKind(child->kind);
+    const bool keep_inside = (child->kind == SyntaxKind::StandardCaseItem || declares ||
                               slang::syntax::ExpressionSyntax::isKind(child->kind)) &&
                              first && first.location().buffer() != buffer_ &&
                              OnlyMacroUsageBefore(first, macro_name);
     if (keep_inside) {
       // What precedes the macro call ("`ifdef X", comments) stays outside.
       // Only once, at the case item: nested expressions share the macro.
-      if (child->kind == SyntaxKind::StandardCaseItem && macro_name &&
+      if ((child->kind == SyntaxKind::StandardCaseItem || declares) && macro_name &&
           macro_name.location().buffer() == buffer_) {
         EmitTrivia(macro_name, out);
       }
