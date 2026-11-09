@@ -1132,6 +1132,11 @@ class SlangAnalyzer::Builder {
     // items rather than inside the first item. List nodes never share a first
     // token with their elements here, so directives stay inside lists.
     Token first = child->getFirstToken();
+    // "`A, `B: ..." : a macro that expands to the first case item expression
+    // stays with the expressions.
+    const bool keep_inside = child->kind == SyntaxKind::StandardCaseItem && first &&
+                             first.location().buffer() != buffer_;
+    if (keep_inside) first = Token();
     if (first && !SameToken(first, parent_first_.back())) EmitTrivia(first, out);
     // "`MACRO(...);" where the macro expanded to nothing: slang sees an empty
     // item/statement. Keep the ';' with the macro call.
@@ -1549,10 +1554,16 @@ std::vector<std::string> StubDefinitions(std::string_view text,
     bool operand = false;       // some use is followed by an operator
     bool size = false;          // used as the size of a based literal
     bool assertion = false;     // followed by "property" / "sequence"
+    bool trailing = false;      // follows a complete list element
   };
   std::map<std::string, Info> infos;
-  for (size_t offset : usage_offsets) {
+  // Ends of macro uses that complete an operand, in source order.
+  std::set<size_t> operand_ends;
+  std::vector<size_t> offsets = usage_offsets;
+  std::sort(offsets.begin(), offsets.end());
+  for (size_t offset : offsets) {
     if (offset >= text.size() || text[offset] != '`') continue;
+    bool after_operand = false;
     size_t end = offset + 1;
     while (end < text.size() && IsIdentChar(text[end])) ++end;
     std::string name(text.substr(offset + 1, end - offset - 1));
@@ -1611,7 +1622,9 @@ std::vector<std::string> StubDefinitions(std::string_view text,
       }
       // "`M;" is a statement: an identifier keeps "assert (x) `M; else ...".
       const size_t next = NextCodeStart(text, end);
-      if (!at_item_start || DeclaresName(text, end) || (next < text.size() && text[next] == ';')) {
+      // "`A, `B:" (case items) are values.
+      if (!at_item_start || DeclaresName(text, end) ||
+          (next < text.size() && std::strchr(";,:", text[next]))) {
         info.not_alone = true;
       }
     }
@@ -1627,7 +1640,44 @@ std::vector<std::string> StubDefinitions(std::string_view text,
       // "[0:`W-1]": after ':' an argument-less macro is a value; one with
       // arguments may be a statement ("1: `uvm_info(...)").
       if (c == ':' && (end >= text.size() || text[end] != '(')) info.expression = true;
+      // "[i+:`M(a, b)]", "[`M(a, b):0]".
+      if (c == ':' && p >= 2 && (text[p - 2] == '+' || text[p - 2] == '-')) info.expression = true;
+      const size_t after = NextCodeStart(text, call_end);
+      if (call_end != end && after < text.size() && text[after] == ']') info.expression = true;
       if ((c == '{' || c == ';') && InStructBody(text, p - 1)) info.member = true;
+      // "parameter `M(x)": the macro is the declared name.
+      if (IsIdentChar(c)) {
+        size_t w = p;
+        while (w > 0 && IsIdentChar(text[w - 1])) --w;
+        const std::string_view word = text.substr(w, p - w);
+        if (word == "parameter" || word == "localparam") info.expression = true;
+        // "= e_cfg `M(x) `N(y) , ...": the macro adds list elements after a
+        // complete operand, so it expands to nothing here.
+        const bool keyword = word == "begin" || word == "else" || word.starts_with("end");
+        if (!keyword && (w == 0 || text[w - 1] != '`')) after_operand = true;
+      }
+      if (operand_ends.count(p)) after_operand = true;
+      // "- (a + b) `M(x)": a parenthesized operand.
+      if (c == ')') {
+        int depth = 0;
+        for (size_t i = p; i-- > 0;) {
+          if (text[i] == ')') ++depth;
+          else if (text[i] == '(' && --depth == 0) {
+            const size_t q = PreviousCodeEnd(text, i);
+            if (q > 0 && kExprChars.find(text[q - 1]) != std::string_view::npos) after_operand = true;
+            break;
+          }
+        }
+      }
+      // A value ("= `CFG", "= `CLOG2(n)") ends an operand too.
+      if (kExprChars.find(c) != std::string_view::npos) operand_ends.insert(call_end);
+    }
+    if (after_operand && call_end != end) {
+      const size_t next = NextCodeStart(text, call_end);
+      if (next < text.size() && std::strchr(",)`", text[next])) {
+        info.trailing = true;
+        operand_ends.insert(call_end);
+      }
     }
     // "`MODE property (...)": the macro is assert / assume / cover.
     if (call_end == end) {
@@ -1666,6 +1716,7 @@ std::vector<std::string> StubDefinitions(std::string_view text,
     else if (info.literal || info.size) def += info.size ? " 8" : " 0";
     // A constraint item: a constant expression is a valid one.
     else if (info.constraint && !info.operand) def += info.no_semicolon ? " 1;" : " 1";
+    else if (info.trailing && !info.expression) {}
     // An argument-less macro alone on its line is an item ("`uvm_object_utils_end").
     else if (info.arity < 0 && !info.expression && (items_empty || !info.not_alone)) {}
     else if (info.arity < 0 || info.expression) def += " __svfmt_macro__";
