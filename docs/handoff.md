@@ -81,7 +81,12 @@ build/svfmt --dump_cst x.sv; build/svfmt --show_token_partition_tree x.sv
    comment of "end", and the second pass joins "else" with its single
    statement (Verible: same); more `infer` flips on leading-comma lists
    (Verible: same).
-8. Planned (not started): a fragment mode for formatting a snippet that is
+8. Partly done (2026-11-09): a file that does not parse is retried as a
+   module body, as statements, then as class items (commit 69406a2). In 09
+   the remaining ~1450 rejections are mostly not SystemVerilog in any
+   context (prose and "..." from the PDF); ~220 parse only as a bare
+   expression, which no excerpt mode covers yet.
+   Original plan: a fragment mode for formatting a snippet that is
    not a valid file on its own (editor selections, most of 09-lrm-examples).
    Wrap the text in a few contexts in turn (module body, statement inside
    `initial begin ... end`, expression), use the first that parses, strip
