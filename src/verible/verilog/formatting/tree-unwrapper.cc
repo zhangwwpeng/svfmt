@@ -200,6 +200,8 @@ static bool IsStatementKind(SyntaxKind k) {
   switch (k) {
     case SyntaxKind::EmptyStatement:
     case SyntaxKind::ExpressionStatement:
+    case SyntaxKind::VoidCastedCallStatement:
+    case SyntaxKind::RandSequenceStatement:
     case SyntaxKind::ProceduralAssignStatement:
     case SyntaxKind::ProceduralForceStatement:
     case SyntaxKind::ProceduralDeassignStatement:
@@ -543,6 +545,7 @@ static bool ShouldIndentRelativeToDirectParent(
     case SyntaxKind::AlwaysFFBlock:
     case SyntaxKind::AlwaysLatchBlock:
     case SyntaxKind::FinalBlock:
+    case SyntaxKind::RsCodeBlock:
       return true;
     default:
       // kIfClause in Verible.
@@ -1221,6 +1224,9 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
     case SyntaxKind::LetDeclaration:
     case SyntaxKind::NetTypeDeclaration:
     case SyntaxKind::ConstraintDeclaration:
+    case SyntaxKind::ConstraintPrototype:
+    case SyntaxKind::TimeUnitsDeclaration:
+    case SyntaxKind::ExternInterfaceMethod:
     case SyntaxKind::ExpressionConstraint:
     case SyntaxKind::ImplicationConstraint:
     case SyntaxKind::ConditionalConstraint:
@@ -1230,7 +1236,6 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
     case SyntaxKind::LoopConstraint:
     case SyntaxKind::CoverageOption:
     case SyntaxKind::CoverageBins:
-    case SyntaxKind::CoverCross:
     case SyntaxKind::BinsSelection:
     case SyntaxKind::DistItem:
     case SyntaxKind::StructUnionMember:
@@ -1348,6 +1353,8 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
     // search-anchor: STATEMENT_TYPES
     case SyntaxKind::EmptyStatement:
     case SyntaxKind::ExpressionStatement:
+    case SyntaxKind::VoidCastedCallStatement:
+    case SyntaxKind::RandSequenceStatement:
     case SyntaxKind::ProceduralAssignStatement:
     case SyntaxKind::ProceduralForceStatement:
     case SyntaxKind::ProceduralDeassignStatement:
@@ -1386,7 +1393,7 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
       const bool in_block_list = IsInsideFirstIf(
           Context(),
           [](SyntaxKind k) { return static_cast<int>(k) == Tag(ListKind::BlockStatement_items); },
-          [](SyntaxKind) { return false; });
+          [](SyntaxKind k) { return k == SyntaxKind::RsCodeBlock; });
       const int indent = in_block_list ? 0
                          : ShouldIndentRelativeToDirectParent(Context())
                              ? style_.indentation_spaces
@@ -1522,7 +1529,15 @@ void TreeUnwrapper::SetIndentationsForOtherKinds(const SyntaxTreeNode &node,
       break;
     }
 
-    case SyntaxKind::Coverpoint: {
+    // randsequence productions: one per line, one level in.
+    case SyntaxKind::Production: {
+      VisitIndentedSection(node, style_.indentation_spaces,
+                           PartitionPolicyEnum::kFitOnLineElseExpand);
+      break;
+    }
+
+    case SyntaxKind::Coverpoint:
+    case SyntaxKind::CoverCross: {
       VisitIndentedSection(node, 0,
                            style_.expand_coverpoints
                                ? PartitionPolicyEnum::kAlwaysExpand
@@ -3061,6 +3076,7 @@ void TreeUnwrapper::ReshapeTokenPartitions(
       // kNetVariableAssignment, kBlockingAssignmentStatement,
       // kNonblockingAssignmentStatement, kAssignModifyStatement, kStatement
       case SyntaxKind::ExpressionStatement:
+      case SyntaxKind::VoidCastedCallStatement:
       case SyntaxKind::ProceduralAssignStatement:
       case SyntaxKind::ProceduralForceStatement: {
         AttachTrailingSemicolonToPreviousPartition(&partition);
@@ -3149,6 +3165,19 @@ void TreeUnwrapper::ReshapeTokenPartitions(
           // Flatten only the statement block so that the control partition
           // can retain its own partition policy.
           FlattenOneChild(partition, verible::BirthRank(seq_block_partition));
+        } else if (partition.Children().size() > 1 && !verible::is_leaf(partition.Children().back()) &&
+                   body != nullptr && body->Tag().tag == static_cast<int>(SyntaxKind::TimingControlStatement) &&
+                   LastChildNode(*body) != nullptr && NodeIsBeginEndBlock(*LastChildNode(*body))) {
+          // svfmt: "repeat (n) @(posedge clk) begin": keep the timing control
+          // and 'begin' on the loop header's line, as for a plain block.
+          auto &timed_partition = partition.Children().back();
+          auto &first = LeftmostDescendant(timed_partition);
+          const auto range = first.Value().TokensRange();
+          if (is_leaf(first) && !range.empty() && range.back().TokenEnum() == TK_begin &&
+              !PartitionIsForcedIntoNewLine(first)) {
+            verible::MergeLeafIntoPreviousLeaf(&first);
+            FlattenOneChild(partition, verible::BirthRank(timed_partition));
+          }
         }
         break;
       }

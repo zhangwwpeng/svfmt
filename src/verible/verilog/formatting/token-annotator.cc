@@ -456,7 +456,8 @@ static WithReason<int> SpacesRequiredBetween(
                          {SyntaxKind::ConstraintBlock, SyntaxKind::ConstraintDeclaration})) {
       return {1, "Space before '{' when opening a constraint definition body."};
     }
-    if (DirectParentIs(right_context, SyntaxKind::Coverpoint)) {
+    if (DirectParentIs(right_context, SyntaxKind::Coverpoint) ||
+        DirectParentIs(right_context, SyntaxKind::CoverCross)) {
       return {1, "Space before '{' when opening a coverpoint body."};
     }
     if (DirectParentIs(right_context, SyntaxKind::EnumType)) {
@@ -501,6 +502,12 @@ static WithReason<int> SpacesRequiredBetween(
   // Cannot merge tokens that would result in a different token.
   if (PairwiseNonmergeable(left) && PairwiseNonmergeable(right)) {
     return {1, "Cannot pair {number, identifier, keyword} without space."};
+  }
+
+  // randsequence production "name : rules;"
+  if ((right.TokenEnum() == ':' && DirectParentIs(right_context, SyntaxKind::Production)) ||
+      (left.TokenEnum() == ':' && DirectParentIs(left_context, SyntaxKind::Production))) {
+    return {1, "Space around ':' of a randsequence production"};
   }
 
   if (right.TokenEnum() == ':') {

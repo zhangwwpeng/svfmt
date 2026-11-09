@@ -117,6 +117,19 @@ class Formatter {
 };
 
 // TODO(b/148482625): make this public/re-usable for general content comparison.
+// A block comment's text with the indentation of its continuation lines
+// removed: Emit() shifts those lines along with the comment.
+static std::string WithoutLineIndents(std::string_view text) {
+  std::string out;
+  bool line_start = false;
+  for (char c : text) {
+    if (line_start && (c == ' ' || c == '\t')) continue;
+    line_start = c == '\n';
+    out += c;
+  }
+  return out;
+}
+
 // Not declared in any header, but also used in formatter_test
 extern Status VerifyFormatting(const verible::TextStructureView &text_structure,
                                std::string_view formatted_output,
@@ -151,8 +164,11 @@ extern Status VerifyFormatting(const verible::TextStructureView &text_structure,
     const auto after = significant((*reanalyzer)->Data().TokenStream());
     const size_t n = std::min(before.size(), after.size());
     for (size_t i = 0; i < n; ++i) {
-      if (before[i]->token_enum() != after[i]->token_enum() ||
-          before[i]->text() != after[i]->text()) {
+      const bool same_text =
+          before[i]->text() == after[i]->text() ||
+          (before[i]->token_enum() == TK_COMMENT_BLOCK &&
+           WithoutLineIndents(before[i]->text()) == WithoutLineIndents(after[i]->text()));
+      if (before[i]->token_enum() != after[i]->token_enum() || !same_text) {
         return absl::DataLossError(absl::StrCat(
             "Formatted output is lexically different from the input.    "
             "Please file a bug.  Details:\nFirst mismatched token [", i, "]: (",
@@ -1346,6 +1362,57 @@ static verible::LineTerminatorStyle DetermineOutputLineTerminator(
   return verible::LineTerminatorStyle::kLF;
 }
 
+// If `line` starts with a multi-line block comment that was alone at the start
+// of its original line and now starts at another column, returns the comment
+// with every continuation line shifted by the same number of columns. Returns
+// nothing when a line would lose non-space characters or uses tabs.
+static std::optional<std::string> ShiftedBlockComment(const verible::FormattedExcerpt &line,
+                                                      std::string_view full_text) {
+  const verible::FormattedToken &front = line.Tokens().front();
+  const std::string_view comment = front.token->text();
+  if (front.token->token_enum() != TK_COMMENT_BLOCK ||
+      comment.find('\n') == std::string_view::npos ||
+      front.before.action == verible::SpacingDecision::kPreserve) {
+    return std::nullopt;
+  }
+  const size_t offset = front.token->left(full_text);
+  const size_t line_begin = offset == 0 ? 0 : full_text.rfind('\n', offset - 1) + 1;
+  const std::string_view prefix = full_text.substr(line_begin, offset - line_begin);
+  if (prefix.find_first_not_of(' ') != std::string_view::npos) return std::nullopt;
+  const int old_column = static_cast<int>(prefix.size());
+  const int new_column =
+      line.IndentationSpaces() +
+      (front.before.action == verible::SpacingDecision::kAlign ? front.before.spaces : 0);
+  const int delta = new_column - old_column;
+  if (delta == 0) return std::nullopt;
+
+  std::string out;
+  size_t begin = 0;
+  bool first = true;
+  while (begin <= comment.size()) {
+    size_t end = comment.find('\n', begin);
+    if (end == std::string_view::npos) end = comment.size();
+    std::string_view text = comment.substr(begin, end - begin);
+    if (!first && text.find_first_not_of(" \r") != std::string_view::npos) {
+      const size_t spaces = std::min(text.find_first_not_of(' '), text.size());
+      if (text.substr(0, spaces + 1).find('\t') != std::string_view::npos) return std::nullopt;
+      if (delta > 0) {
+        out.append(delta, ' ');
+      } else if (static_cast<int>(spaces) >= -delta) {
+        text.remove_prefix(-delta);
+      } else {
+        return std::nullopt;
+      }
+    }
+    out.append(text);
+    if (end == comment.size()) break;
+    out += '\n';
+    begin = end + 1;
+    first = false;
+  }
+  return out;
+}
+
 void Formatter::Emit(bool include_disabled, std::ostream &stream) const {
   const std::string_view full_text(text_structure_.Contents());
   std::function<bool(const verible::TokenInfo &)> include_token_p;
@@ -1378,8 +1445,20 @@ void Formatter::Emit(bool include_disabled, std::ostream &stream) const {
     // the left-indentation for this line should be suppressed to avoid
     // being printed twice.
     if (!line.Tokens().empty()) {
-      line.FormattedText(stream, !disabled_ranges_.Contains(front_offset),
-                         include_token_p);
+      const bool indent = !disabled_ranges_.Contains(front_offset);
+      const auto shifted = indent ? ShiftedBlockComment(line, full_text) : std::nullopt;
+      if (shifted) {
+        // The line starts with a multi-line block comment that moved: its
+        // continuation lines move with it.
+        std::ostringstream rendered;
+        line.FormattedText(rendered, indent, include_token_p);
+        std::string text = rendered.str();
+        const std::string_view comment = line.Tokens().front().token->text();
+        text.replace(text.find(comment), comment.size(), *shifted);
+        stream << text;
+      } else {
+        line.FormattedText(stream, indent, include_token_p);
+      }
       position = line.Tokens().back().token->right(full_text);
     }
   }

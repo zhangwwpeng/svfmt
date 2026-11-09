@@ -183,6 +183,14 @@ static bool StartsWithDirective(verible::FormatTokenRange range) {
   return IsPreprocessorKeyword(verilog_tokentype(e)) || e == svfmt::TK_SVFMT_DISABLED_TEXT;
 }
 
+// A row holding a struct/union body: aligning the row would put the whole
+// body on one line.
+static bool HasStructUnionBody(const TokenPartitionTree &partition) {
+  return verible::FindFirstSubtree(partition.Value().Origin(), [](const Symbol &symbol) {
+           return symbol.Tag() == verible::NodeTag(ListKind::StructUnionType_members);
+         }) != nullptr;
+}
+
 static bool IgnoreCommentsAndPreprocessingDirectives(
     const TokenPartitionTree &partition) {
   const auto &uwline = partition.Value();
@@ -196,6 +204,9 @@ static bool IgnoreCommentsAndPreprocessingDirectives(
   if (TokensAreAllCommentsOrAttributes(token_range)) return true;
 
   if (PartitionHasLeadingTokensBeforeForcedWrap(partition)) return true;
+
+  // svfmt: a "parameter type t = struct {...}" or struct variable row.
+  if (HasStructUnionBody(partition)) return true;
 
   // ignore partitions belonging to preprocessing directives
   return StartsWithDirective(token_range);
@@ -250,15 +261,7 @@ static bool IgnoreWithinStructUnionMemberPartitionGroup(
   if (PartitionHasLeadingTokensBeforeForcedWrap(partition)) return true;
 
   // ignore nested structs/unions
-  if (verible::FindFirstSubtree(
-          partition.Value().Origin(), [](const Symbol &symbol) {
-            return symbol.Tag() ==
-                   verible::NodeTag(ListKind::StructUnionType_members);
-          }) != nullptr) {
-    return true;
-  }
-
-  return false;
+  return HasStructUnionBody(partition);
 }
 
 static bool IgnoreWithinActualNamedParameterPartitionGroup(
@@ -435,7 +438,10 @@ class VerilogColumnSchemaScanner : public ColumnSchemaScanner {
     size_t i = 0;
     for (const auto &child : dims.children()) {
       const SyntaxTreeNode *dim = AsNode(child.get());
-      if (!dim || KindOfSym(*dim) != SyntaxKind::VariableDimension) continue;
+      if (!dim || (KindOfSym(*dim) != SyntaxKind::VariableDimension &&
+                   KindOfSym(*dim) != SyntaxKind::ElementSelect)) {
+        continue;
+      }
       Path dim_path = base;
       dim_path.push_back(right_align ? static_cast<Path::value_type>(kMaxPathIndex - (count - i))
                                      : static_cast<Path::value_type>(i));
@@ -465,6 +471,14 @@ class VerilogColumnSchemaScanner : public ColumnSchemaScanner {
   // The dimensions list of a data type node (packed dimensions), if any.
   static const SyntaxTreeNode *PackedDimensions(const SyntaxTreeNode *type) {
     if (!type) return nullptr;
+    // slang reads "user_t [7:0]" as a name with selectors.
+    if (KindOfSym(*type) == SyntaxKind::NamedType && !type->empty()) {
+      const SyntaxTreeNode *name = AsNode(type->front().get());
+      if (name && KindOfSym(*name) == SyntaxKind::IdentifierSelectName) {
+        return ChildWithTag(*name, ListKind::IdentifierSelectName_selectors);
+      }
+      return nullptr;
+    }
     for (const auto &child : type->children()) {
       if (child && child->Kind() == verible::SymbolKind::kNode &&
           IsDimensionsList(child->Tag().tag)) {
@@ -740,14 +754,9 @@ class ParameterDeclarationColumnSchemaScanner : public VerilogColumnSchemaScanne
       const auto *n = AsNode(child.get());
       if (n && (KindOfSym(*n) == SyntaxKind::EqualsValueClause ||
                 KindOfSym(*n) == SyntaxKind::EqualsTypeClause)) {
+        // svfmt: the dimensions of an assigned type ("type T = logic [3:0]")
+        // get no column: a long value in another row would push them far right.
         ReserveNewColumn(*n, FlushLeft, {5});
-        // "type T = int [3:0]": align the dimensions of the assigned type.
-        if (KindOfSym(*n) == SyntaxKind::EqualsTypeClause && n->size() > 1) {
-          if (const auto *tdims = PackedDimensions(AsNode(n->back().get()))) {
-            auto *group = ReserveNewColumn(*tdims, FlushLeft, {6});
-            ReserveDimensions(group, *tdims, {6}, false);
-          }
-        }
       }
     }
   }
@@ -1115,7 +1124,7 @@ static const AlignmentHandlerMapType &AlignmentHandlerLibrary() {
   static const auto *handler_map = new AlignmentHandlerMapType{
       {AlignableSyntaxSubtype::kDataDeclaration,
        {UnstyledAlignmentCellScannerGenerator<
-            DataDeclarationColumnSchemaScanner>(),
+            DataDeclarationColumnSchemaScanner>(non_tree_column_scanner),
         function_from_pointer_to_member(
             &FormatStyle::module_net_variable_alignment)}},
       {AlignableSyntaxSubtype::kNamedActualParameters,
@@ -1160,11 +1169,11 @@ static const AlignmentHandlerMapType &AlignmentHandlerLibrary() {
         function_from_pointer_to_member(
             &FormatStyle::assignment_statement_alignment)}},
       {AlignableSyntaxSubtype::kBlockingAssignment,
-       {UnstyledAlignmentCellScannerGenerator<AssignmentColumnSchemaScanner>(),
+       {UnstyledAlignmentCellScannerGenerator<AssignmentColumnSchemaScanner>(non_tree_column_scanner),
         function_from_pointer_to_member(
             &FormatStyle::assignment_statement_alignment)}},
       {AlignableSyntaxSubtype::kNonBlockingAssignment,
-       {UnstyledAlignmentCellScannerGenerator<AssignmentColumnSchemaScanner>(),
+       {UnstyledAlignmentCellScannerGenerator<AssignmentColumnSchemaScanner>(non_tree_column_scanner),
         function_from_pointer_to_member(
             &FormatStyle::assignment_statement_alignment)}},
       {AlignableSyntaxSubtype::kEnumListAssignment,

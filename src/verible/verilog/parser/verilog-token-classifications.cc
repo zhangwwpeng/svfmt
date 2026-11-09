@@ -173,6 +173,14 @@ bool IsEndKeyword(verilog_tokentype token_type) {
     case verilog_tokentype::TK_endclocking:
     case verilog_tokentype::TK_endclass:
     case verilog_tokentype::TK_endmodule:
+    // svfmt: the rest of the end* keywords.
+    case verilog_tokentype::TK_endsequence:
+    case verilog_tokentype::TK_endprogram:
+    case verilog_tokentype::TK_endchecker:
+    case verilog_tokentype::TK_endprimitive:
+    case verilog_tokentype::TK_endspecify:
+    case verilog_tokentype::TK_endtable:
+    case verilog_tokentype::TK_endconfig:
       // TODO(fangism): join and join* keywords?
       return true;
     default:

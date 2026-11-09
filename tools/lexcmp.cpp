@@ -11,6 +11,9 @@
 // whitespace between them means nothing, but the lexer reads "00" or "x0" as
 // one token; table tokens are compared character by character.
 //
+// The indentation of a block comment's continuation lines is not compared:
+// the formatter shifts them along with the comment.
+//
 // usage: svfmt-lexcmp <before.sv> <after.sv>
 // exit 0 if equivalent; 1 with a description of the first difference.
 
@@ -50,6 +53,17 @@ std::string ReadFile(const char *path) {
   return ss.str();
 }
 
+std::string WithoutLineIndents(std::string_view text) {
+  std::string out;
+  bool line_start = false;
+  for (char c : text) {
+    if (line_start && (c == ' ' || c == '\t')) continue;
+    line_start = c == '\n';
+    out += c;
+  }
+  return out;
+}
+
 std::vector<Item> Lex(SourceManager &sm, const std::string &text, const char *name) {
   BumpAllocator alloc;
   Diagnostics diags;
@@ -74,8 +88,11 @@ std::vector<Item> Lex(SourceManager &sm, const std::string &text, const char *na
             end_directive();
           }
           break;
-        case TriviaKind::LineComment:
         case TriviaKind::BlockComment:
+          items.push_back({std::string(toString(trivia.kind)),
+                           WithoutLineIndents(trivia.getRawText()), 0});
+          break;
+        case TriviaKind::LineComment:
         case TriviaKind::DisabledText:
         case TriviaKind::SkippedTokens:
           items.push_back({std::string(toString(trivia.kind)), std::string(trivia.getRawText()),
