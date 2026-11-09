@@ -205,6 +205,13 @@ static WithReason<int> SpacesRequiredBetween(
     return {1, "Space before inactive branch text."};
   }
 
+  // svfmt: "`M\n(" is a macro without arguments followed by '(': joining
+  // them would make the '(' its argument list.
+  if (left.TokenEnum() == MacroIdentifier && right.TokenEnum() == '(') {
+    return {static_cast<int>(right.OriginalLeadingSpaces().length()),
+            "Keep the spacing between a macro name and a '('."};
+  }
+
   // svfmt: an edge descriptor ("1Z", "x0") is lexed as a number and an
   // identifier; it is one word.
   if (svfmt::IsInside(left_context, SyntaxKind::EdgeDescriptor) &&
@@ -943,6 +950,9 @@ static WithReason<SpacingOptions> BreakDecisionBetween(
   if (svfmt::IsInside(left_context, SyntaxKind::EdgeDescriptor) &&
       svfmt::IsInside(right_context, SyntaxKind::EdgeDescriptor)) {
     return {SpacingOptions::kMustAppend, "An edge descriptor is one word."};
+  }
+  if (left.TokenEnum() == MacroIdentifier && right.TokenEnum() == '(') {
+    return {SpacingOptions::kPreserve, "Keep the spacing between a macro name and a '('."};
   }
   // svfmt: "`W'b0": the macro is the size of the literal.
   if (left.TokenEnum() == MacroIdentifier &&

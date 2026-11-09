@@ -1154,7 +1154,13 @@ class SlangAnalyzer::Builder {
                           child->kind == SyntaxKind::NetDeclaration ||
                           child->kind == SyntaxKind::HierarchyInstantiation ||
                           child->kind == SyntaxKind::ConcurrentAssertionMember ||
-                          slang::syntax::ConcurrentAssertionStatementSyntax::isKind(child->kind);
+                          slang::syntax::ConcurrentAssertionStatementSyntax::isKind(child->kind) ||
+                          // "`TEST_SUITE begin" (initial), "`TEST_CASE(x) begin" (if),
+                          // not a whole statement from a macro ("`CHECK(a, b);").
+                          ((slang::syntax::ProceduralBlockSyntax::isKind(child->kind) ||
+                            child->kind == SyntaxKind::ConditionalStatement) &&
+                           child->getLastToken().location().buffer() == buffer_ &&
+                           child->getLastToken().kind != slang::parsing::TokenKind::Semicolon);
     const bool keep_inside = (child->kind == SyntaxKind::StandardCaseItem || declares ||
                               slang::syntax::ExpressionSyntax::isKind(child->kind)) &&
                              first && first.location().buffer() != buffer_ &&
@@ -1697,6 +1703,50 @@ bool InEventControl(std::string_view text, size_t pos) {
   return false;
 }
 
+// Whether `pos` is inside a begin-end (fork-join, function, task) block of
+// the design element that contains it. A prototype ("extern function f();")
+// counts too: only "`M begin" relies on this.
+bool InsideBegin(std::string_view text, size_t pos) {
+  size_t start = 0;
+  for (std::string_view kw : {"module", "program", "interface", "class"}) {
+    for (size_t at = text.rfind(kw, pos); at != std::string_view::npos;
+         at = at == 0 ? std::string_view::npos : text.rfind(kw, at - 1)) {
+      if ((at == 0 || !IsIdentChar(text[at - 1])) &&
+          (at + kw.size() >= text.size() || !IsIdentChar(text[at + kw.size()]))) {
+        start = std::max(start, at);
+        break;
+      }
+    }
+  }
+  int depth = 0;
+  for (size_t i = start; i < pos;) {
+    if (text.substr(i, 2) == "//") {
+      while (i < pos && text[i] != '\n') ++i;
+    } else if (text.substr(i, 2) == "/*") {
+      const size_t e = text.find("*/", i + 2);
+      i = e == std::string_view::npos ? pos : e + 2;
+    } else if (text[i] == '"') {
+      for (++i; i < pos && text[i] != '"'; ++i) {
+        if (text[i] == '\\') ++i;
+      }
+      ++i;
+    } else if (IsIdentChar(text[i]) || text[i] == '`') {
+      size_t j = i + 1;
+      while (j < text.size() && IsIdentChar(text[j])) ++j;
+      const std::string_view word = text.substr(i, j - i);
+      if (word == "begin" || word == "fork" || word == "function" || word == "task") ++depth;
+      else if ((word == "end" || word.starts_with("join") || word == "endfunction" ||
+                word == "endtask") && depth > 0) {
+        --depth;
+      }
+      i = j;
+    } else {
+      ++i;
+    }
+  }
+  return depth > 0;
+}
+
 std::vector<std::string> StubDefinitions(std::string_view text,
                                          const std::vector<size_t> &usage_offsets,
                                          bool items_empty) {
@@ -1712,6 +1762,8 @@ std::vector<std::string> StubDefinitions(std::string_view text,
     bool size = false;          // used as the size of a based literal
     bool assertion = false;     // followed by "property" / "sequence"
     bool body = false;          // the body of a loop / else
+    bool begin_item = false;    // "`M begin" as a module item: "initial"
+    bool begin_stmt = false;    // "`M begin" as a statement: "if (1)"
     bool if_body = false;       // "if (c) `M(a); else": the ';' ends the body
     bool trailing = false;      // follows a complete list element
   };
@@ -1840,6 +1892,16 @@ std::vector<std::string> StubDefinitions(std::string_view text,
       // A value ("= `CFG", "= `CLOG2(n)") ends an operand too.
       if (kExprChars.find(c) != std::string_view::npos) operand_ends.insert(call_end);
     }
+    // "`TEST_SUITE begin", "`TEST_CASE("x") begin" (VUnit): the macro heads a
+    // block, a process at module level or a statement inside one.
+    // Only "`M begin" on one line: a statement macro followed by a block on
+    // the next line is a statement (the formatter keeps both layouts).
+    if (const size_t next = text.find_first_not_of(" \t", call_end);
+        next != std::string_view::npos && text.substr(next, 5) == "begin" &&
+        (next + 5 >= text.size() || !IsIdentChar(text[next + 5])) &&
+        (p == 0 || std::strchr(";)}", text[p - 1]) || IsIdentChar(text[p - 1]))) {
+      (InsideBegin(text, offset) ? info.begin_stmt : info.begin_item) = true;
+    }
     // "foreach (x[i]) `M(a);": the body of a control statement must be a
     // statement, so the macro is one.
     if (p > 0 && ControlsStatement(text, p)) info.body = true;
@@ -1899,6 +1961,9 @@ std::vector<std::string> StubDefinitions(std::string_view text,
       def += ')';
     }
     if (info.assertion) def += " assert";
+    else if (info.begin_item != info.begin_stmt && !info.expression) {
+      def += info.begin_item ? " initial" : " if (1)";
+    }
     else if (info.body && !info.if_body && !info.expression && !info.member) def += " begin end";
     else if (info.member) def += info.no_semicolon ? " int __svfmt_macro__;" : " int __svfmt_macro__";
     else if (info.literal || info.size) def += info.size ? " 8" : " 0";
