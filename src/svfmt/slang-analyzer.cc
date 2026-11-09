@@ -669,6 +669,13 @@ class SlangAnalyzer::Builder {
     if (!group->empty()) out.AppendChild(std::move(group));
   }
 
+  template <typename ListT>
+  static bool LabelBeforeAttributes(const slang::syntax::NamedLabelSyntax *label,
+                                    const ListT &attributes) {
+    if (label == nullptr || attributes.empty()) return false;
+    return label->getFirstToken().location() < attributes[0]->getFirstToken().location();
+  }
+
   // Hand-written conversions that insert Verible-like grouping nodes.
   bool ConvertSpecial(const SyntaxNode &node, SyntaxTreeNode &out) {
     using namespace slang::syntax;
@@ -819,9 +826,12 @@ class SlangAnalyzer::Builder {
       case SyntaxKind::SequentialBlockStatement:
       case SyntaxKind::ParallelBlockStatement: {
         const auto &n = node.as<BlockStatementSyntax>();
-        List(n.attributes, static_cast<int>(ListKind::BlockStatement_attributes), out);
+        // "L: (* a *) begin": the label may come before the attributes.
+        const bool label_first = LabelBeforeAttributes(n.label, n.attributes);
+        if (!label_first) List(n.attributes, static_cast<int>(ListKind::BlockStatement_attributes), out);
         Group(GroupKind::kBegin, out, [&](SyntaxTreeNode &g) {
           Child(n.label, g);
+          if (label_first) List(n.attributes, static_cast<int>(ListKind::BlockStatement_attributes), g);
           Tok(n.begin, g);
           Child(n.blockName, g);
         });
@@ -834,9 +844,12 @@ class SlangAnalyzer::Builder {
       }
       case SyntaxKind::GenerateBlock: {
         const auto &n = node.as<GenerateBlockSyntax>();
-        List(n.attributes, static_cast<int>(ListKind::GenerateBlock_attributes), out);
+        // "L: (* a *) begin": the label may come before the attributes.
+        const bool label_first = LabelBeforeAttributes(n.label, n.attributes);
+        if (!label_first) List(n.attributes, static_cast<int>(ListKind::GenerateBlock_attributes), out);
         Group(GroupKind::kBegin, out, [&](SyntaxTreeNode &g) {
           Child(n.label, g);
+          if (label_first) List(n.attributes, static_cast<int>(ListKind::GenerateBlock_attributes), g);
           Tok(n.begin, g);
           Child(n.beginName, g);
         });

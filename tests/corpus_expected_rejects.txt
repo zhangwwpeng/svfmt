@@ -7,3 +7,12 @@
 sv2v/repo/test/error/*
 sv-tests/repo/tests/*/*illegal*
 sv-tests/repo/tests/*/*invalid*
+
+# 05-eda-tool-tests: negative tests of the tools
+verilator/repo/test_regress/t/*_bad*
+iverilog/repo/ivtest/ivltests/*_fail*
+iverilog/repo/ivtest/ivltests/*error*
+yosys/repo/tests/errors/*
+
+# 08-weird-syntax
+sv-parser/repo/sv-parser-pp/testcases/err_*
