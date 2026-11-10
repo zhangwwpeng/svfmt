@@ -222,6 +222,26 @@ static bool HeaderHasLongList(const verible::Symbol &header) {
          }) != nullptr;
 }
 
+// svfmt: true if a subroutine header (declaration or prototype) is a task's.
+static bool IsTaskHeader(const verible::SyntaxTreeNode &header) {
+  return verible::FindFirstSubtree(&header, [](const verible::Symbol &s) {
+           return s.Tag() == verible::LeafTag(verilog_tokentype::TK_task);
+         }) != nullptr;
+}
+
+// svfmt: true inside the header of a task (declaration or prototype).
+static bool InsideTaskHeader(const verible::SyntaxTreeContext &context) {
+  for (auto it = context.rbegin(); it != context.rend(); ++it) {
+    const int tag = (*it)->Tag().tag;
+    if (tag == static_cast<int>(GroupKind::kSubroutineHeader) ||
+        tag == static_cast<int>(SyntaxKind::ClassMethodPrototype) ||
+        tag == static_cast<int>(SyntaxKind::ExternInterfaceMethod)) {
+      return IsTaskHeader(**it);
+    }
+  }
+  return false;
+}
+
 // Statement kinds that Verible handles under search-anchor STATEMENT_TYPES.
 static bool IsStatementKind(SyntaxKind k) {
   switch (k) {
@@ -1096,7 +1116,13 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
                                  {SyntaxKind::DPIImport, SyntaxKind::DPIExport})) {
           const int indent = suppress_indentation ? 0 : style_.indentation_spaces;
           VisitIndentedSection(node, indent, PartitionPolicyEnum::kTabularAlignment);
+        } else if (InsideTaskHeader(Context())) {
+          // svfmt: the ports of a task are laid out like a module's: one per
+          // line when the header does not fit (see ExpandTaskPortsIfTooLong).
+          const int indent = suppress_indentation ? 0 : style_.PortDeclarationsIndentation();
+          VisitIndentedSection(node, indent, PartitionPolicyEnum::kFitOnLineElseExpand);
         } else {
+          // svfmt: a function's ports pack like a C function's parameters.
           const int indent = suppress_indentation ? 0 : style_.wrap_spaces;
           VisitIndentedSection(node, indent, PartitionPolicyEnum::kFitOnLineElseExpand);
         }
@@ -1181,7 +1207,8 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
         return;
       case GroupKind::kSubroutineHeader:
         if (svfmt::IsInsideAnyOf(Context(),
-                                 {SyntaxKind::DPIImport, SyntaxKind::DPIExport})) {
+                                 {SyntaxKind::DPIImport, SyntaxKind::DPIExport}) ||
+            IsTaskHeader(node)) {
           VisitIndentedSection(node, 0, PartitionPolicyEnum::kFitOnLineElseExpand);
         } else {
           VisitIndentedSection(node, 0, PartitionPolicyEnum::kAppendFittingSubPartitions);
@@ -1341,9 +1368,17 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
     case SyntaxKind::RandCaseItem:
     case SyntaxKind::ElseClause:
     case SyntaxKind::ClassPropertyDeclaration:
-    case SyntaxKind::ClassMethodPrototype:
     case SyntaxKind::ContinuousAssign: {
       VisitIndentedSection(node, 0, PartitionPolicyEnum::kFitOnLineElseExpand);
+      break;
+    }
+
+    // svfmt: a function prototype wraps like a function declaration, a task
+    // prototype like a task declaration.
+    case SyntaxKind::ClassMethodPrototype: {
+      VisitIndentedSection(node, 0,
+                           IsTaskHeader(node) ? PartitionPolicyEnum::kFitOnLineElseExpand
+                                              : PartitionPolicyEnum::kAppendFittingSubPartitions);
       break;
     }
 
@@ -2987,6 +3022,19 @@ static void HandleDataDeclaration(const SyntaxTreeNode &node,
 // The header of a subroutine (return type, dimensions, name, opening paren)
 // stays on one line: a break is only allowed inside the port list, which is
 // the first child that is not a leaf.
+// svfmt: a task header that does not fit on one line puts its ports one per
+// line, like a module's; a fitting header stays on one line.
+static void ExpandTaskPortsIfTooLong(const FormatStyle &style, TokenPartitionTree *partition) {
+  if (verible::FitsOnLine(partition->Value(), style).fits) return;
+  for (auto &child : partition->Children()) {
+    const auto *origin = child.Value().Origin();
+    if (!is_leaf(child) && origin &&
+        origin->Tag() == verible::NodeTag(ListKind::FunctionPortList_ports)) {
+      child.Value().SetPartitionPolicy(PartitionPolicyEnum::kAlwaysExpand);
+    }
+  }
+}
+
 static void MergeLeadingLeafPartitions(TokenPartitionTree *partition) {
   auto &children = partition->Children();
   size_t k = 0;
@@ -3108,9 +3156,12 @@ void TreeUnwrapper::ReshapeTokenPartitions(
       case GroupKind::kSubroutineHeader: {
         MergeLeadingLeafPartitions(&partition);
         // May end up with a trailing ");" subpartition; attach it to the item
-        // that preceded it.
+        // that preceded it. svfmt: not for a task, whose ");" closes the port
+        // list on its own line like a module's.
         auto &last = RightmostDescendant(partition);
-        if (PartitionIsCloseParenSemi(last)) {
+        if (IsTaskHeader(node)) {
+          ExpandTaskPortsIfTooLong(style, &partition);
+        } else if (PartitionIsCloseParenSemi(last)) {
           verible::MergeLeafIntoPreviousLeaf(&last);
         }
         break;
@@ -3167,9 +3218,17 @@ void TreeUnwrapper::ReshapeTokenPartitions(
         }
         break;
       }
-      case SyntaxKind::ClassMethodPrototype:
+      case SyntaxKind::ClassMethodPrototype: {
         MergeLeadingLeafPartitions(&partition);
+        // svfmt: a function prototype keeps ");" on its last port.
+        auto &last = RightmostDescendant(partition);
+        if (IsTaskHeader(node)) {
+          ExpandTaskPortsIfTooLong(style, &partition);
+        } else if (PartitionIsCloseParenSemi(last)) {
+          verible::MergeLeafIntoPreviousLeaf(&last);
+        }
         break;
+      }
       case SyntaxKind::ModuleHeader:
       case SyntaxKind::InterfaceHeader:
       case SyntaxKind::ProgramHeader: {

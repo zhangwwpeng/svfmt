@@ -52,6 +52,11 @@ build-dev while a corpus run uses it.
 - Tabs become spaces up to the next indentation stop.
 - A parameter or port list with at most one element stays on one line when
   it fits; any longer list expands the whole header.
+- Subroutine headers (2026-11-10): a function's ports pack like a C
+  function's parameters (clang-format style: continuation aligned after "(",
+  or all ports on the next line when that gives fewer lines); a task's ports
+  go one per line with ");" on its own line, like a module's, when the header
+  does not fit. Both apply to declarations and class prototypes.
 - Search-limit rejections count as ok (default budget 300000).
 
 ## Open items
