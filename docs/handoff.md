@@ -1,104 +1,73 @@
-# Handoff notes (2026-11-07)
+# Handoff notes (2026-11-10)
 
 State at commit time; read this first when resuming.
 
-## Results
-- No longer compared with Verible (2026-11-08). The verible_diff and
-  verible_cases tests and their inputs are removed. Macro arguments are kept
-  verbatim (not formatted). The last Verible comparison was 2064/2111; the
-  review list of its differences is reports/remaining-verible-diffs.md
-  (untracked). Testing is safety only: the corpus test (run_corpus.py
-  --no-parity) and format_inputs.
-- Local real-code corpus (206 files from ~/workspace/verilog-ethernet,
-  solouvm, tree-sitter-systemverilog): 0 safety failures, 183/204 identical
-  to Verible.
+## Goals and results
+- Safety first: formatting never changes the token stream. A file that
+  cannot be formatted safely is echoed unchanged (exit 1 with
+  --failsafe_success=false). Since 2026-11-08 there is no Verible
+  comparison; the style is our own, starting from Verible's.
+- Corpus ../sv_test (26.5k files, 01-09): 0 semantic_change /
+  not_idempotent / crash / timeout, with default flags and with the nvim
+  alignment flags (build-dev/full-nvim/run_all.sh). Remaining rejections in
+  01-08 were checked by hand: illegal on purpose
+  (tests/corpus_expected_rejects.txt), tool dialects, slang strictness, or
+  multi-file. 09 (LRM excerpts) is mostly prose; fragment mode was dropped
+  (2026-11-10).
+- Style reviews: random corpus files formatted with the nvim flags and
+  reviewed by vibe, findings checked and fixed by hand
+  (reports/style-review-N, untracked; regression inputs
+  tests/inputs/style_review*.sv, sv_constructs.sv).
 
 ## Environment
-- Verible source (reference for porting): ~/workspace/ref/verible (085eef05)
-- Matching oracle binary:
-  ~/workspace/ref/verible-bin/verible-v0.0-4298-g085eef05-macOS/bin/verible-verilog-format
-  Configure: cmake -S . -B build -DSVFMT_VERIBLE_FORMAT=<that path>
-- The system verible-verilog-format on PATH is an OLDER version; don't use it
-  as the oracle.
+- Verible source (reference for porting): ~/workspace/ref/verible (085eef05);
+  oracle binary ~/workspace/ref/verible-bin/.../verible-verilog-format
+  (only to compare behavior by hand now).
+- The editor uses ~/.local/bin/svfmt (copied from build-dev after a clean
+  corpus run) through conform.nvim with --failsafe_success=false.
 
 ## Commands
 ```sh
-cmake --build build -j && ctest --test-dir build
-VERIBLE_FORMAT=<oracle> python3 tests/run_verible_cases.py build/svfmt tests/verible_cases.jsonl --out build/cases_report
-python3 tools/show_cases.py build/cases_report/diff.txt <test-file-substring> 5
-python3 tests/run_corpus.py build <corpus dir> --verible <oracle> --out build/corpus_report
+cmake --build build -j && ctest --test-dir build        # golden tests
+tests/update_expected.sh build/svfmt                     # after an intended change
+sh build-dev/full/run_all.sh                             # corpus, default flags
+sh build-dev/full-nvim/run_all.sh                        # corpus, nvim flags
 build/svfmt --dump_cst x.sv; build/svfmt --show_token_partition_tree x.sv
 ```
+Corpus runs use --jobs 4 (the user found 8 too heavy). Don't rebuild
+build-dev while a corpus run uses it.
 
 ## Where things live
-- Edit src/verible/verilog/formatting/*.cc directly. The one-off port scripts
-  are gone, and the original Verible files are in ~/workspace/ref/verible.
-- The bridge is src/svfmt/slang-analyzer.cc: ConvertSpecial() holds the
-  synthetic groups and special cases. Lists come from the generated code
-  (tools/gen_slang_cst.py).
+- src/svfmt/slang-analyzer.cc: the slang bridge (CST conversion, unknown
+  macro stubs, conditional directives, tab expansion, parse-mode retries).
+- src/verible/verilog/formatting/*.cc: the formatter (tree-unwrapper,
+  token-annotator, align, formatter); edit directly.
+- tools/lexcmp.cpp: the independent token-stream check used by the corpus
+  runner.
 
-## Open items / next steps
-1. Changing IsVerilogBinaryExpressionKind (assignments are no longer
-   binary) dropped 2 Verible cases (1646 -> 1644 before the macro-argument
-   work). Investigate.
-2. Remaining diffs by test file: function_task, align, wrap_style, macro,
-   module, class_package (see build/cases_report after a run).
-3. Known Verible quirks we don't mimic: "`define FOO_``BAR" spacing, and
-   "interface class" indentation.
-4. Corpus is at ../sv_test (26.5k files). The safety test is delegated to
-   vibe/agy using docs/corpus-safety-test.md; they write
-   reports/corpus-safety-<date>.md and must not change code. Fix the
-   reported safety failures first (semantic_change / rejected_but_changed /
-   crash / timeout / not_idempotent), then parity. A smoke run on
-   09-lrm-examples found 1 crash (clause-21/ex-21-086.sv).
-5. Not yet mapped: clocking blocks, covergroup bins details, assertion and
-   property bodies, DPI, bind, constraint details, randomize-with spacing.
-6. Known corpus leftovers (safe by default: --verify_convergence rejects
-   them, input echoed): `endif in the middle of a wrapped expression
-   (VeeR beh_lib.sv; Verible rejects it as a syntax error), and comments
-   after "`else // c" re-indenting between passes (rv_tracer te_reg.sv;
-   Verible has the same non-convergence). Reports: reports/round*/
-   (untracked).
-7. More known leftovers from 01-sv-compliance (all safe by default):
-   enum alignment under `infer` and comments after a ")"-with-comment
-   between parameter list and instance name do not converge (Verible: same);
-   an `endif after unparsable disabled text gets glued to the next token
-   (rejected by output verification); very long parameter lists hit the
-   line-wrap search limit; macro arguments that build escaped identifiers
-   via `` are rejected by re-parse (Verible formats them and changes the
-   expansion). From 03-verilog-designs: leading-comma named port
-   connections with EOL comments under `named_port_alignment=infer` flip
-   from align to preserve on the second pass (Verible: same). From
-   06-uvm-libs: `formal_parameters_alignment=infer` on a continued
-   parameter list flips align -> flush-left (Verible: same); a parameter
-   whose value is an argument-less macro followed by ", // long comment"
-   breaks before the ',' on the first pass (Verible keeps the line; svfmt
-   gives the macro its own partition, which Verible does in some contexts
-   but not this one). From 07-assertions: when an `if` header with tabs is
-   kept verbatim and "begin // c" follows, the first comment in the block
-   gains one column on the second pass (Verible: same). From
-   08-weird-syntax: a comment line between "end" and "else" becomes an EOL
-   comment of "end", and the second pass joins "else" with its single
-   statement (Verible: same); more `infer` flips on leading-comma lists
-   (Verible: same).
-8. Partly done (2026-11-09): a file that does not parse is retried as a
-   module body, as statements, then as class items (commit 69406a2). In 09
-   the remaining ~1450 rejections are mostly not SystemVerilog in any
-   context (prose and "..." from the PDF); ~220 parse only as a bare
-   expression, which no excerpt mode covers yet.
-   Original plan: a fragment mode for formatting a snippet that is
-   not a valid file on its own (editor selections, most of 09-lrm-examples).
-   Wrap the text in a few contexts in turn (module body, statement inside
-   `initial begin ... end`, expression), use the first that parses, strip
-   the wrapper after formatting, and lexcmp the fragment. --lines does not
-   cover this: it still needs the whole file to parse (Verible: same).
-9. 01-sv-compliance, vibe round (2026-11-08), checked by hand:
-   - R1: a long nested-ternary localparam (Surelog BlackParrot*) hits the
-     line-wrap search limit. --max_search_states=10000000 formats it (~10 s);
-     the default is left as is (trade-off, not a semantic issue).
-   - R2: IEEE 1735 protected envelope (`pragma protect key_block ...) is
-     skipped by slang with a warning; rejection is the correct outcome.
-   - R3: `module top import P::FOO; ;` is rejected by slang ("expected
-     parameter list or port list") but accepted by Verible; probably a slang
-     strictness difference (unverified against the LRM text). Rejection is safe.
-   - N1, N2: the not_idempotent leftovers of item 7 (Verible: same).
+## Decisions in force
+- Macro arguments are not formatted inside (spacing and line breaks between
+  top-level arguments are).
+- Single-file formatting only (includes are placeholders).
+- Tabs become spaces up to the next indentation stop.
+- A parameter or port list with at most one element stays on one line when
+  it fits; any longer list expands the whole header.
+- Search-limit rejections count as ok (default budget 300000).
+
+## Open items
+1. --try_wrap_long_lines stays off by default: it wraps long single-partition
+   lines (e.g. a long assign) nicely, but re-wraps `define lines (losing
+   their column alignment, moving trailing comments) and ~1% of files do not
+   converge. A long line that cannot be wrapped is kept as it was.
+2. Known non-convergent leftovers (safe: rejected, input echoed; Verible has
+   the same): `endif in the middle of a wrapped expression (VeeR
+   beh_lib.sv), comments after "`else // c" (rv_tracer te_reg.sv), `infer`
+   alignment flips on leading-comma lists and continued parameter lists,
+   a comment line between "end" and "else".
+3. `macro(N) else chains (basejump bsg_xnor style) indent one level per
+   link.
+4. Style choices kept from Verible (reviewers keep reporting them): single
+   statements on the line of if/always/repeat when they fit, "module tb ();",
+   enum members one per line, leading-comma lists indent the first element
+   one more level, "type#(T)" in typedefs vs "type #(T)" in declarations,
+   dist lists with more than one item expand.

@@ -228,12 +228,9 @@ static bool IgnoreWithinPortDeclarationPartitionGroup(
   if (uwline.Origin()->Kind() != verible::SymbolKind::kNode) return false;
   const auto &origin = verible::SymbolCastToNode(*uwline.Origin());
   const auto tag = origin.Tag().tag;
-  if (tag == static_cast<int>(SyntaxKind::ImplicitAnsiPort)) {
-    const auto *first = origin.children().begin() == origin.children().end()
-                            ? nullptr
-                            : origin.children().begin()->get();
-    return first != nullptr && first->Tag().tag == static_cast<int>(SyntaxKind::Declarator);
-  }
+  // svfmt: an ANSI port with no direction or type ("b" in "input logic a,
+  // b") is aligned: its name goes under the names of the other ports.
+  if (tag == static_cast<int>(SyntaxKind::ImplicitAnsiPort)) return false;
   return tag == static_cast<int>(SyntaxKind::ImplicitNonAnsiPort) ||
          tag == static_cast<int>(SyntaxKind::ExplicitNonAnsiPort) ||
          tag == static_cast<int>(SyntaxKind::ExplicitAnsiPort);
@@ -551,6 +548,9 @@ class PortDeclarationColumnSchemaScanner : public VerilogColumnSchemaScanner {
       if (!n) continue;
       if (KindOfSym(*n) == SyntaxKind::Declarator) {
         declarator = n;
+      } else if (n->Tag().tag == static_cast<int>(ListKind::PortDeclaration_declarators)) {
+        // svfmt: a non-ANSI port declaration in a module body.
+        if (!n->empty()) declarator = AsNode(n->front().get());
       } else if (!header) {
         header = n;
       }
@@ -681,7 +681,12 @@ class DataDeclarationColumnSchemaScanner : public VerilogColumnSchemaScanner {
     if (!declarator || declarator->empty()) return;
     ReserveNewColumn(*declarator, FlushLeft, {2});
     if (const auto *dims = ChildWithTag(*declarator, ListKind::Declarator_dimensions)) {
-      ReserveDimensions(nullptr, *dims, {3}, false);
+      // svfmt: a lone unpacked dimension ("data[$]") is not pushed to the end
+      // of the widest row.
+      AlignmentColumnProperties props = FlushLeft;
+      props.needs_two_rows = true;
+      auto *group = ReserveNewColumn(*dims, props, {3});
+      ReserveDimensions(group, *dims, {3}, false);
     }
     if (align_assignment_) {
       if (const auto *init = ChildWithTag(*declarator, SyntaxKind::EqualsValueClause)) {
@@ -954,6 +959,12 @@ static std::vector<TaggedTokenPartitionRange> GetConsecutiveModuleItemGroups(
         if (IsAlignableDeclaration(node)) {
           return AlignClassify(AlignmentGroupAction::kMatch,
                                AlignableSyntaxSubtype::kDataDeclaration);
+        }
+        // svfmt: non-ANSI port declarations ("output [7:0] q;") with one name.
+        if (node.MatchesTag(SyntaxKind::PortDeclaration) &&
+            CountChildNodes(ChildWithTag(node, ListKind::PortDeclaration_declarators)) == 1) {
+          return AlignClassify(AlignmentGroupAction::kMatch,
+                               AlignableSyntaxSubtype::kPortDeclaration);
         }
         // Align continuous assignment, like "assign foo = bar;"
         if (node.MatchesTag(SyntaxKind::ContinuousAssign) &&

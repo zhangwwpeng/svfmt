@@ -478,8 +478,11 @@ static WithReason<int> SpacesRequiredBetween(
       right.TokenEnum() == '[') {
     // slang: '[' of a VariableDimension that belongs to a data type, not to
     // a declarator (unpacked dimensions).
+    // svfmt: the dimensions after a typedef's name ("typedef int t[4];")
+    // hang on the TypedefDeclaration.
     if ((DirectParentIs(right_context, SyntaxKind::VariableDimension) &&
-         AncestorKind(right_context, 1) != SyntaxKind::Declarator) ||
+         AncestorKind(right_context, 1) != SyntaxKind::Declarator &&
+         AncestorKind(right_context, 1) != SyntaxKind::TypedefDeclaration) ||
         (DirectParentIs(right_context, SyntaxKind::ElementSelect) &&
          InNamedTypeSelect(right_context))) {
       // "type [packed...]" (space between type and packed dimensions)
@@ -1078,6 +1081,23 @@ static WithReason<SpacingOptions> BreakDecisionBetween(
     if (left.TokenEnum() == '}') {
       return {SpacingOptions::kMustAppend,
               "'}'-'else' and should be together on one line."};
+    }
+    // svfmt: the fail action of an assertion with no pass action
+    // ("assert (x) else $error();") may stay on the line.
+    if (left.TokenEnum() == ')' && DirectParentIs(right_context, SyntaxKind::ElseClause)) {
+      switch (AncestorKind(right_context, 1)) {
+        case SyntaxKind::ImmediateAssertStatement:
+        case SyntaxKind::ImmediateAssumeStatement:
+        case SyntaxKind::ImmediateCoverStatement:
+        case SyntaxKind::AssertPropertyStatement:
+        case SyntaxKind::AssumePropertyStatement:
+        case SyntaxKind::CoverPropertyStatement:
+        case SyntaxKind::CoverSequenceStatement:
+        case SyntaxKind::ExpectPropertyStatement:
+          return {SpacingOptions::kUndecided, "assertion 'else' may stay on the line"};
+        default:
+          break;
+      }
     }
     // TODO(fangism): Some styles prefer to start with 'else' on its own line.
     return {SpacingOptions::kMustWrap, "'else' starts its own line."};

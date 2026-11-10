@@ -32,6 +32,7 @@
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_join.h"
 #include "verible/common/formatting/format-token.h"
+#include "verible/common/formatting/line-wrap-searcher.h"
 #include "verible/common/formatting/token-partition-tree.h"
 #include "verible/common/formatting/tree-unwrapper.h"
 #include "verible/common/formatting/unwrapped-line.h"
@@ -1002,6 +1003,13 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
                              PartitionPolicyEnum::kAlwaysExpand);
         return;
 
+      // svfmt: the items of a case in a property, one level in.
+      case ListKind::CasePropertyExpr_items: {
+        const int indent = suppress_indentation ? 0 : style_.indentation_spaces;
+        VisitIndentedSection(node, indent, PartitionPolicyEnum::kAlwaysExpand);
+        return;
+      }
+
       // svfmt: the body of a coverpoint or cross, one level in.
       case ListKind::Coverpoint_members:
       case ListKind::CoverCross_members: {
@@ -1116,8 +1124,11 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
           VisitIndentedSection(node, style_.wrap_spaces, PartitionPolicyEnum::kWrap);
           return;
         }
+        // svfmt: also "$error(...)" as a module / generate item, and "new(...)".
         if (AncestorKind(Context()) == SyntaxKind::ArgumentList &&
-            AncestorKind(Context(), 1) == SyntaxKind::InvocationExpression) {
+            (AncestorKind(Context(), 1) == SyntaxKind::InvocationExpression ||
+             AncestorKind(Context(), 1) == SyntaxKind::ElabSystemTask ||
+             AncestorKind(Context(), 1) == SyntaxKind::NewClassExpression)) {
           VisitIndentedSection(node, style_.wrap_spaces,
                                PartitionPolicyEnum::kFitOnLineElseExpand);
           return;
@@ -1276,9 +1287,9 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
     case SyntaxKind::NetTypeDeclaration:
     case SyntaxKind::ConstraintDeclaration:
     case SyntaxKind::ConstraintPrototype:
+    case SyntaxKind::ElabSystemTask:
     case SyntaxKind::TimeUnitsDeclaration:
     case SyntaxKind::ExternInterfaceMethod:
-    case SyntaxKind::ExpressionConstraint:
     case SyntaxKind::ImplicationConstraint:
     case SyntaxKind::ConditionalConstraint:
     case SyntaxKind::UniquenessConstraint:
@@ -1473,6 +1484,16 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
       }
       break;
     // kModportSimplePortsDeclaration, kModportTFPortsDeclaration
+    // svfmt: "input a, b, c" stays on one line when it fits, else one port
+    // per line after "input a,", at the wrap indentation.
+    case SyntaxKind::ModportNamedPort:
+    case SyntaxKind::ModportExplicitPort:
+      if (DirectParentTag(Context()) == Tag(ListKind::ModportSimplePortList_ports)) {
+        VisitIndentedSection(node, style_.wrap_spaces, PartitionPolicyEnum::kFitOnLineElseExpand);
+      } else {
+        TraverseChildren(node);
+      }
+      break;
     case SyntaxKind::ModportSimplePortList:
     case SyntaxKind::ModportSubroutinePortList:
     case SyntaxKind::ModportClockingPort:
@@ -1583,6 +1604,27 @@ void TreeUnwrapper::SetIndentationsForOtherKinds(const SyntaxTreeNode &node,
     // randsequence productions: one per line, one level in.
     case SyntaxKind::Production: {
       VisitIndentedSection(node, style_.indentation_spaces,
+                           PartitionPolicyEnum::kFitOnLineElseExpand);
+      break;
+    }
+
+    case SyntaxKind::StandardPropertyCaseItem:
+    case SyntaxKind::DefaultPropertyCaseItem:
+      VisitIndentedSection(node, 0, PartitionPolicyEnum::kFitOnLineElseExpand);
+      break;
+    case SyntaxKind::CasePropertyExpr:
+      VisitIndentedSection(node, 0, PartitionPolicyEnum::kAlwaysExpand);
+      break;
+
+    // svfmt: a constraint that is the body of "if (...)", "else", "foreach"
+    // or "x ->" goes one level in when it is on its own line.
+    case SyntaxKind::ExpressionConstraint: {
+      const auto parent = AncestorKind(Context());
+      const bool body = parent == SyntaxKind::ConditionalConstraint ||
+                        parent == SyntaxKind::ElseConstraintClause ||
+                        parent == SyntaxKind::LoopConstraint ||
+                        parent == SyntaxKind::ImplicationConstraint;
+      VisitIndentedSection(node, body ? style_.indentation_spaces : 0,
                            PartitionPolicyEnum::kFitOnLineElseExpand);
       break;
     }
@@ -2129,6 +2171,100 @@ static void FlattenElseIfElse(const SyntaxTreeNode &else_clause,
   if (NodeIsConditionalConstruct(else_body_subnode) &&
       GetAnyConditionalElseClause(else_body_subnode) != nullptr) {
     FlattenOneChild(partition, partition.Children().size() - 1);
+  }
+}
+
+// True if a constraint "if" (or an "else if" chained to it) has a "{...}"
+// block body.
+static bool ConstraintChainHasBlock(const SyntaxTreeNode &conditional) {
+  for (const auto &child : conditional.children()) {
+    if (!child || child->Kind() != verible::SymbolKind::kNode) continue;
+    const auto &n = verible::SymbolCastToNode(*child);
+    switch (Kind(n)) {
+      case SyntaxKind::ConstraintBlock:
+        return true;
+      case SyntaxKind::ElseConstraintClause:
+      case SyntaxKind::ConditionalConstraint:
+        if (ConstraintChainHasBlock(n)) return true;
+        break;
+      default:
+        break;
+    }
+  }
+  return false;
+}
+
+// svfmt: "if (...) x; else y;" in a constraint, like an if statement: "else"
+// joins a following "if" or "{", an "else if" chain is flat, and a chain with
+// any "{...}" block is expanded.
+static void ReshapeConditionalConstraint(const SyntaxTreeNode &node, const FormatStyle &style,
+                                         TokenPartitionTree *partition_ptr) {
+  auto &partition = *partition_ptr;
+  auto &children = partition.Children();
+  // "if (...)" or "else" and a one-line body share a line when it fits.
+  for (size_t i = 0; i + 1 < children.size(); ++i) {
+    if (!is_leaf(children[i]) || !is_leaf(children[i + 1])) continue;
+    const auto head = children[i].Value().TokensRange();
+    const auto body = children[i + 1].Value().TokensRange();
+    if (head.empty() || body.empty() || body.back().TokenEnum() != ';') continue;
+    const bool if_head =
+        head.front().TokenEnum() == verilog_tokentype::TK_if && head.back().TokenEnum() == ')';
+    const bool else_head = head.size() == 1 && head.front().TokenEnum() == verilog_tokentype::TK_else;
+    if (!if_head && !else_head) continue;
+    verible::UnwrappedLine joined(children[i].Value().IndentationSpaces(), head.begin(),
+                                  PartitionPolicyEnum::kFitOnLineElseExpand);
+    joined.SpanUpToToken(body.end());
+    if (verible::FitsOnLine(joined, style).fits) verible::MergeLeafIntoPreviousLeaf(&children[i + 1]);
+  }
+  for (size_t i = 0; i + 1 < children.size(); ++i) {
+    if (!is_leaf(children[i])) continue;
+    const auto tokens = children[i].Value().TokensRange();
+    if (tokens.empty() || tokens.back().TokenEnum() != verilog_tokentype::TK_else) continue;
+    auto &next = children[i + 1];
+    const auto next_tokens = LeftmostDescendant(next).Value().TokensRange();
+    if (next_tokens.empty()) continue;
+    const int first = next_tokens.front().TokenEnum();
+    if (first != verilog_tokentype::TK_if && first != '{') continue;
+    const bool nested = !is_leaf(next);
+    verible::MergeLeafIntoNextLeaf(&children[i]);
+    if (nested) FlattenOneChild(partition, i);
+    break;
+  }
+  if (ConstraintChainHasBlock(node)) {
+    partition.Value().SetPartitionPolicy(PartitionPolicyEnum::kAlwaysExpand);
+  }
+}
+
+// svfmt: "label : assert (...)" keeps the label on the assertion's line, and
+// an action block "else begin" with no pass action joins "assert (...)".
+static void ReshapeAssertion(const FormatStyle &style, TokenPartitionTree *partition_ptr) {
+  auto &children = partition_ptr->Children();
+  if (children.size() > 1 && is_leaf(children.front()) && is_leaf(children[1])) {
+    const auto label = children.front().Value().TokensRange();
+    const auto next = children[1].Value().TokensRange();
+    if (!label.empty() && label.back().TokenEnum() == ':' && !next.empty()) {
+      verible::UnwrappedLine joined(children.front().Value().IndentationSpaces(), label.begin(),
+                                    PartitionPolicyEnum::kFitOnLineElseExpand);
+      joined.SpanUpToToken(next.end());
+      if (verible::FitsOnLine(joined, style).fits) {
+        verible::MergeLeafIntoNextLeaf(&children.front());
+      }
+    }
+  }
+  for (size_t i = 1; i < children.size(); ++i) {
+    auto &child = children[i];
+    if (is_leaf(child) || !is_leaf(children[i - 1])) continue;
+    const auto header = children[i - 1].Value().TokensRange();
+    if (header.empty() || header.back().TokenEnum() != ')') continue;
+    auto &first = LeftmostDescendant(child);
+    const auto tokens = first.Value().TokensRange();
+    if (tokens.size() != 2 || tokens.front().TokenEnum() != verilog_tokentype::TK_else ||
+        tokens.back().TokenEnum() != verilog_tokentype::TK_begin) {
+      continue;
+    }
+    verible::MergeLeafIntoPreviousLeaf(&first);
+    FlattenOneChild(*partition_ptr, i);
+    break;
   }
 }
 
@@ -3120,6 +3256,8 @@ void TreeUnwrapper::ReshapeTokenPartitions(
 
       case SyntaxKind::ConditionalStatement:
       case SyntaxKind::IfGenerate:
+        ReshapeConditionalConstruct(node, &partition, style_);
+        break;
       case SyntaxKind::ImmediateAssertStatement:
       case SyntaxKind::ImmediateAssumeStatement:
       case SyntaxKind::ImmediateCoverStatement:
@@ -3130,6 +3268,7 @@ void TreeUnwrapper::ReshapeTokenPartitions(
       case SyntaxKind::ExpectPropertyStatement:
       case SyntaxKind::RestrictPropertyStatement:
         ReshapeConditionalConstruct(node, &partition, style_);
+        ReshapeAssertion(style, &partition);
         break;
 
       case SyntaxKind::DefineDirective: {
@@ -3139,6 +3278,10 @@ void TreeUnwrapper::ReshapeTokenPartitions(
         }
         break;
       }
+
+      case SyntaxKind::ConditionalConstraint:
+        ReshapeConditionalConstraint(node, style, &partition);
+        break;
 
       case SyntaxKind::ConstraintDeclaration: {
         if (partition.Children().size() == 2) {
@@ -3154,6 +3297,7 @@ void TreeUnwrapper::ReshapeTokenPartitions(
       // kNonblockingAssignmentStatement, kAssignModifyStatement, kStatement
       case SyntaxKind::ExpressionStatement:
       case SyntaxKind::VoidCastedCallStatement:
+      case SyntaxKind::ElabSystemTask:
       case SyntaxKind::ProceduralAssignStatement:
       case SyntaxKind::ProceduralForceStatement: {
         AttachTrailingSemicolonToPreviousPartition(&partition);
@@ -3179,6 +3323,21 @@ void TreeUnwrapper::ReshapeTokenPartitions(
           if (pos + 1 < children.size() &&
               children[pos].Children().empty() == children[pos + 1].Children().empty()) {
             verible::MergeConsecutiveSiblings(&partition, pos);
+          }
+        } else if (tbody != nullptr && Kind(*tbody) == SyntaxKind::ConditionalStatement &&
+                   offsets.size() > 1) {
+          // svfmt: "@(posedge clk) if (x) begin" stays on one line.
+          auto &children = partition.Children();
+          const size_t pos = offsets[1] - 1;
+          if (pos + 1 < children.size() && is_leaf(children[pos])) {
+            auto &header = LeftmostDescendant(children[pos + 1]);
+            const auto tokens = header.Value().TokensRange();
+            if (!tokens.empty() && tokens.front().TokenEnum() == verilog_tokentype::TK_if &&
+                tokens.back().TokenEnum() == verilog_tokentype::TK_begin &&
+                header.Value().IndentationSpaces() == children[pos].Value().IndentationSpaces() &&
+                !PartitionIsForcedIntoNewLine(header)) {
+              verible::MergeLeafIntoNextLeaf(&children[pos]);
+            }
           }
         }
         break;
@@ -3269,6 +3428,23 @@ void TreeUnwrapper::ReshapeTokenPartitions(
           auto &end_partition = RightmostDescendant(seq_block_partition);
           verible::MergeLeafIntoNextLeaf(&end_partition);
           FlattenOneChild(partition, verible::BirthRank(seq_block_partition));
+          // svfmt: the block always expands (a fitting "do begin x; end while"
+          // would otherwise be wrapped by the line search around the forced
+          // break before "end"); "end while (...);" stays one line.
+          partition.Value().SetPartitionPolicy(PartitionPolicyEnum::kAlwaysExpand);
+          auto &children = partition.Children();
+          size_t end_pos = children.size();
+          for (size_t i = 0; i < children.size(); ++i) {
+            const auto tokens = children[i].Value().TokensRange();
+            if (is_leaf(children[i]) && !tokens.empty() &&
+                tokens.front().TokenEnum() == verilog_tokentype::TK_end) {
+              end_pos = i;
+            }
+          }
+          while (end_pos + 1 < children.size()) {
+            children[end_pos + 1].Children().clear();
+            verible::MergeConsecutiveSiblings(&partition, end_pos);
+          }
         }
         break;
       }
@@ -3294,6 +3470,18 @@ void TreeUnwrapper::ReshapeTokenPartitions(
 
       case SyntaxKind::ModportDeclaration: {
         AttachSeparatorsToListElementPartitions(&partition);
+        break;
+      }
+
+      case SyntaxKind::ModportSimplePortList: {
+        // ',' joins the port before it; "input" joins the first port.
+        FlattenOnlyChildrenWithChildren(partition);
+        AttachSeparatorsToListElementPartitions(&partition);
+        auto &children = partition.Children();
+        if (children.size() > 1 && is_leaf(children.front()) && is_leaf(children[1]) &&
+            !PartitionIsAllComments(children.front())) {
+          verible::MergeLeafIntoPreviousLeaf(&children[1]);
+        }
         break;
       }
 

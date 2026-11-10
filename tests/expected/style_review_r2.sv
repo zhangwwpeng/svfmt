@@ -6,7 +6,7 @@ class c;
   constraint k {
     if (e) {
       (reserved_c == kReservedAddi16sp) ->
-      ((c_msb == 3'b011) && (c_op == 2'b01) &&
+        ((c_msb == 3'b011) && (c_op == 2'b01) &&
                                              (instr_bin[11:7] == 2) &&
                                              !instr_bin[12] && (instr_bin[6:2] == 0));
     }
