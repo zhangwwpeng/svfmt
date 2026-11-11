@@ -944,8 +944,12 @@ static WithReason<SpacingOptions> BreakDecisionBetween(
   // break anywhere in its header (e.g. a long formal argument list) changes
   // the definition. Verible wraps long argument lists here and breaks the
   // macro. Keep the original spacing.
+  // A trailing EOL comment belongs to the define's line too (its context is
+  // the next tree token's, so it is only "inside" when another `define
+  // follows).
   if ((svfmt::IsInside(left_context, SyntaxKind::DefineDirective) &&
-       svfmt::IsInside(right_context, SyntaxKind::DefineDirective)) ||
+       (svfmt::IsInside(right_context, SyntaxKind::DefineDirective) ||
+        right.format_token_enum == FTT::eol_comment)) ||
       (svfmt::IsInside(left_context, SyntaxKind::PragmaDirective) &&
        svfmt::IsInside(right_context, SyntaxKind::PragmaDirective))) {
     return {SpacingOptions::kPreserve,
@@ -1023,6 +1027,12 @@ static WithReason<SpacingOptions> BreakDecisionBetween(
     }
   }
 
+  // svfmt: a ',' never starts a line that it did not start in the input (a
+  // leading ',' is read as leading-comma style on the next pass).
+  if (right.TokenEnum() == ',') {
+    return {SpacingOptions::kMustAppend, "No line break before ','"};
+  }
+
   if (left.format_token_enum == FTT::comment_block ||
       right.format_token_enum == FTT::comment_block) {
     auto preceding_whitespace = verible::make_string_view_range(
@@ -1037,6 +1047,11 @@ static WithReason<SpacingOptions> BreakDecisionBetween(
       // Tree Unwrapper.
       return {SpacingOptions::kMustWrap,
               "Force-preserve line break around block comment"};
+    }
+    // svfmt: an inline block comment stays on its line (moved to a line of
+    // its own it becomes a comment line on the next pass).
+    if (right.format_token_enum == FTT::comment_block) {
+      return {SpacingOptions::kMustAppend, "Inline block comment stays on its line"};
     }
   }
 

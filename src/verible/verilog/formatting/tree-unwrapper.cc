@@ -164,6 +164,25 @@ static const SyntaxTreeNode *GetAnyConditionalIfClause(const SyntaxTreeNode &nod
   return FindChildNode(node, static_cast<int>(GroupKind::kIfClause));
 }
 
+// svfmt: the body node of an else clause (or of its kElseBody group), skipping
+// a MacroUsage that precedes the node its expansion became: in
+// "else `M(...)" where `M expands to an if or a block, the body is that if or
+// block.
+static const SyntaxTreeNode *GetElseBodyNode(const SyntaxTreeNode &node) {
+  const SyntaxTreeNode *body = Kind(node) == SyntaxKind::ElseClause
+                                   ? FindChildNode(node, static_cast<int>(GroupKind::kElseBody))
+                                   : &node;
+  if (body == nullptr) return nullptr;
+  const SyntaxTreeNode *first = nullptr;
+  for (const auto &child : body->children()) {
+    if (!child || child->Kind() != verible::SymbolKind::kNode) continue;
+    const auto &n = verible::SymbolCastToNode(*child);
+    if (first == nullptr) first = &n;
+    if (Kind(n) != SyntaxKind::MacroUsage) return &n;
+  }
+  return first;
+}
+
 static const SyntaxTreeNode *GetAnyConditionalElseClause(const SyntaxTreeNode &node) {
   return FindChildNode(node, static_cast<int>(SyntaxKind::ElseClause));
 }
@@ -1229,7 +1248,7 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
         // own section, otherwise, indent single statements here.
         // In the case of else-if, suppress further indentation, deferring to
         // the conditional construct.
-        const auto *subnode = GetAnyControlStatementBody(node);
+        const auto *subnode = GetElseBodyNode(node);
         const auto next_indent = subnode && NodeIsConditionalOrBlock(*subnode)
                                      ? 0
                                      : style_.indentation_spaces;
@@ -1369,7 +1388,10 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
     case SyntaxKind::ElseClause:
     case SyntaxKind::ClassPropertyDeclaration:
     case SyntaxKind::ContinuousAssign: {
-      VisitIndentedSection(node, 0, PartitionPolicyEnum::kFitOnLineElseExpand);
+      // svfmt: the item of a generate case item ("default: initial ...") goes
+      // one level in when it is on the line after the label.
+      const int indent = IsCaseItemKind(AncestorKind(Context())) ? style_.indentation_spaces : 0;
+      VisitIndentedSection(node, indent, PartitionPolicyEnum::kFitOnLineElseExpand);
       break;
     }
 
@@ -2078,8 +2100,7 @@ static void ReshapeIfClause(const SyntaxTreeNode &node,
 static void ReshapeElseClause(const SyntaxTreeNode &node,
                               TokenPartitionTree *partition_ptr) {
   auto &partition = *partition_ptr;
-  const SyntaxTreeNode &else_body_subnode =
-      *ABSL_DIE_IF_NULL(GetAnyControlStatementBody(node));
+  const SyntaxTreeNode &else_body_subnode = *ABSL_DIE_IF_NULL(GetElseBodyNode(node));
   if (!NodeIsConditionalOrBlock(else_body_subnode)) {
     VLOG(4) << "else-body was neither a begin-end block nor if-conditional.";
     // If body is a null statement, attach it to the previous partition.
@@ -2106,9 +2127,16 @@ static void ReshapeElseClause(const SyntaxTreeNode &node,
   // svfmt: a hoisted "if (b) begin" line can have the whole conditional as
   // its origin; its first token tells.
   const auto next_tokens = next_leaf->Value().TokensRange();
+  // svfmt: "else `M(...)" where `M expands to an if: the chain stays flat
+  // like "else if".
+  const bool macro_conditional =
+      NodeIsConditionalConstruct(else_body_subnode) && !next_tokens.empty() &&
+      (next_tokens.front().TokenEnum() == verilog_tokentype::MacroCallId ||
+       next_tokens.front().TokenEnum() == verilog_tokentype::MacroIdentifier);
   const bool starts_if_or_begin =
-      !next_tokens.empty() && (next_tokens.front().TokenEnum() == verilog_tokentype::TK_if ||
-                               next_tokens.front().TokenEnum() == verilog_tokentype::TK_begin);
+      macro_conditional ||
+      (!next_tokens.empty() && (next_tokens.front().TokenEnum() == verilog_tokentype::TK_if ||
+                                next_tokens.front().TokenEnum() == verilog_tokentype::TK_begin));
   if (!starts_if_or_begin &&
       (!next_origin ||
        !(next_origin->Tag() == verible::NodeTag(GroupKind::kBegin) ||

@@ -32,6 +32,7 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
+#include "absl/strings/str_split.h"
 #include "verible/common/formatting/basic-format-style.h"
 #include "verible/common/formatting/format-token.h"
 #include "verible/common/formatting/layout-optimizer.h"
@@ -678,6 +679,33 @@ static bool IsBlockingAssignmentStatement(const verible::Symbol &origin) {
              static_cast<int>(slang::syntax::SyntaxKind::AssignmentExpression);
 }
 
+// svfmt: `uwline` with the original spacing of its tokens (as a line that
+// does not fit keeps without try_wrap_long_lines).
+static verible::FormattedExcerpt PreservedExcerpt(const UnwrappedLine &uwline) {
+  verible::FormattedExcerpt preserved(uwline);
+  auto &tokens = preserved.MutableTokens();
+  for (size_t i = 1; i < tokens.size(); ++i) {
+    if (tokens[i].before.preserved_space_start != verible::string_view_null_iterator()) {
+      tokens[i].before.action = verible::SpacingDecision::kPreserve;
+    }
+  }
+  return preserved;
+}
+
+// svfmt: true if `uwline` does not fit, but fits without its trailing EOL
+// comment.
+static bool OverflowsOnlyByTrailingComment(const UnwrappedLine &uwline,
+                                           const FormatStyle &style) {
+  const auto tokens = uwline.TokensRange();
+  if (tokens.size() < 2 || tokens.back().TokenEnum() != verilog_tokentype::TK_EOL_COMMENT) {
+    return false;
+  }
+  if (verible::FitsOnLine(uwline, style).fits) return false;
+  UnwrappedLine trimmed(uwline);
+  trimmed.SpanUpToToken(tokens.end() - 1);
+  return verible::FitsOnLine(trimmed, style).fits;
+}
+
 // Decided at each node in UnwrappedLine partition tree whether or not
 // it should be expanded or unexpanded.
 static void DeterminePartitionExpansion(
@@ -1306,6 +1334,15 @@ Status Formatter::Format(const ExecutionControl &control) {
       // line-wrapping, but instead accept the adjusted padded spacing.
       formatted_lines_.emplace_back(uwline);
     } else {
+      // svfmt: with try_wrap_long_lines, a line that overflows only because
+      // of its trailing comment is kept as it is (as without the flag);
+      // wrapping the code to make room for a comment is not worth it.
+      if (style_.try_wrap_long_lines &&
+          uwline.PartitionPolicy() == PartitionPolicyEnum::kFitOnLineElseExpand &&
+          OverflowsOnlyByTrailingComment(uwline, style_)) {
+        formatted_lines_.push_back(PreservedExcerpt(uwline));
+        continue;
+      }
       // In other case, default to searching for optimal line wrapping.
       const auto optimal_solutions =
           verible::SearchLineWraps(uwline, style_, control.max_search_states);
@@ -1316,18 +1353,20 @@ Status Formatter::Format(const ExecutionControl &control) {
       }
       // Arbitrarily choose the first solution, if there are multiple.
       formatted_lines_.push_back(optimal_solutions.front());
-      if (!formatted_lines_.back().CompletedFormatting() && style_.try_wrap_long_lines) {
-        // svfmt: a long line that could not be wrapped within the search
-        // limit keeps its original spacing, as without try_wrap_long_lines,
-        // instead of failing the whole file.
-        verible::FormattedExcerpt preserved(uwline);
-        auto &tokens = preserved.MutableTokens();
-        for (size_t i = 1; i < tokens.size(); ++i) {
-          if (tokens[i].before.preserved_space_start != verible::string_view_null_iterator()) {
-            tokens[i].before.action = verible::SpacingDecision::kPreserve;
-          }
+      // svfmt: with try_wrap_long_lines, a line that the search could not
+      // wrap (search limit) or could not make fit (an unbreakable token or a
+      // long comment) keeps its original spacing, as without the flag: the
+      // wrapped layout of such a line is not stable between passes.
+      bool over_limit = false;
+      if (style_.try_wrap_long_lines && formatted_lines_.back().CompletedFormatting()) {
+        const std::string rendered = formatted_lines_.back().Render();
+        for (std::string_view line : absl::StrSplit(rendered, '\n')) {
+          if (static_cast<int>(line.size()) > style_.column_limit) over_limit = true;
         }
-        formatted_lines_.back() = preserved;
+      }
+      if ((!formatted_lines_.back().CompletedFormatting() || over_limit) &&
+          style_.try_wrap_long_lines) {
+        formatted_lines_.back() = PreservedExcerpt(uwline);
       }
       if (!formatted_lines_.back().CompletedFormatting()) {
         // Copy over any lines that did not finish wrap searching.

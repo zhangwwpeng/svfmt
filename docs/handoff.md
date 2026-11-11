@@ -60,18 +60,20 @@ build-dev while a corpus run uses it.
 - Search-limit rejections count as ok (default budget 300000).
 
 ## Open items
-1. --try_wrap_long_lines stays off by default: it wraps long single-partition
-   lines (e.g. a long assign) nicely, but re-wraps `define lines (losing
-   their column alignment, moving trailing comments) and ~1% of files do not
-   converge. A long line that cannot be wrapped is kept as it was.
+1. --try_wrap_long_lines is off by default (a style decision for the user).
+   It wraps long single-partition lines (e.g. a long assign) that are
+   otherwise kept as they are. As of 2026-11-10 it is convergence-clean on
+   a 600-file sample (was 11 rejections): a trailing `define comment stays
+   on its line, no line break is introduced before ',' or an inline block
+   comment, and a line that overflows only because of its trailing comment,
+   or that the search cannot make fit, keeps its original spacing.
+   Cost: ~40% more formatting time on the sample.
 2. Known non-convergent leftovers (safe: rejected, input echoed; Verible has
    the same): `endif in the middle of a wrapped expression (VeeR
    beh_lib.sv), comments after "`else // c" (rv_tracer te_reg.sv), `infer`
    alignment flips on leading-comma lists and continued parameter lists,
    a comment line between "end" and "else".
-3. `macro(N) else chains (basejump bsg_xnor style) indent one level per
-   link.
-4. Style choices kept from Verible (reviewers keep reporting them): single
+3. Style choices kept from Verible (reviewers keep reporting them): single
    statements on the line of if/always/repeat when they fit, "module tb ();",
    enum members one per line, leading-comma lists indent the first element
    one more level, "type#(T)" in typedefs vs "type #(T)" in declarations,
