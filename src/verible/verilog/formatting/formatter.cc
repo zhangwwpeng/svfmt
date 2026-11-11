@@ -58,6 +58,7 @@
 #include "verible/common/util/vector-tree-iterators.h"
 #include "verible/common/util/vector-tree.h"
 #include "svfmt/list-kinds.h"
+#include "lexeq/lex-equivalence.h"
 #include "svfmt/slang-analyzer.h"
 #include "verible/verilog/formatting/align.h"
 #include "verible/verilog/formatting/comment-controls.h"
@@ -562,6 +563,7 @@ Status FormatVerilog(std::string_view text, std::string_view filename,
                      const FormatStyle &style, std::ostream &formatted_stream,
                      const LineNumberSet &lines,
                      const ExecutionControl &control) {
+  const std::string_view original_text = text;
   // Whole file only: line-restricted formatting keeps the text as it is.
   std::string prepared;
   if (lines.empty()) {
@@ -578,6 +580,17 @@ Status FormatVerilog(std::string_view text, std::string_view filename,
   // Commit formatted text to the output stream independent of status.
   formatted_stream << formatted_text;
   if (!format_status.ok()) return format_status;
+
+  // svfmt: the checks above compare the output with the parsed (and possibly
+  // pre-formatted) text. Compare it with the original input too, with a raw
+  // lexer that also covers inactive `ifdef branches and the line ends of
+  // `define / `pragma.
+  if (const auto difference = svfmt::LexicalDifference(original_text, formatted_text)) {
+    return absl::DataLossError(absl::StrCat(
+        "Formatted output is lexically different from the input.    "
+        "Please file a bug.  Details:\n",
+        *difference));
+  }
 
   // When formatting whole-file (no --lines are specified), ensure that
   // the formatting transformation is convergent after one iteration.
@@ -1548,7 +1561,8 @@ void Formatter::Emit(bool include_disabled, std::ostream &stream) const {
         line.FormattedText(rendered, indent, include_token_p);
         std::string text = rendered.str();
         const std::string_view comment = line.Tokens().front().token->text();
-        text.replace(text.find(comment), comment.size(), *shifted);
+        const size_t at = text.find(comment);
+        if (at != std::string::npos) text.replace(at, comment.size(), *shifted);
         stream << text;
       } else {
         line.FormattedText(stream, indent, include_token_p);

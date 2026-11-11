@@ -8,3 +8,6 @@ module m;
   logic [`LOCAL_W-1:0] q;
 endmodule
 `define LAST 1  // last line
+// A block comment at the end of a `define stays on the define's line too.
+`define x(a, b) a /* comment */// * b
+`define y(a, b) a /* comment *//*/ b*/

@@ -944,12 +944,13 @@ static WithReason<SpacingOptions> BreakDecisionBetween(
   // break anywhere in its header (e.g. a long formal argument list) changes
   // the definition. Verible wraps long argument lists here and breaks the
   // macro. Keep the original spacing.
-  // A trailing EOL comment belongs to the define's line too (its context is
-  // the next tree token's, so it is only "inside" when another `define
-  // follows).
+  // A trailing comment (EOL or block) belongs to the define's line too (its
+  // context is the next tree token's, so it is only "inside" when another
+  // `define follows).
   if ((svfmt::IsInside(left_context, SyntaxKind::DefineDirective) &&
        (svfmt::IsInside(right_context, SyntaxKind::DefineDirective) ||
-        right.format_token_enum == FTT::eol_comment)) ||
+        right.format_token_enum == FTT::eol_comment ||
+        right.format_token_enum == FTT::comment_block)) ||
       (svfmt::IsInside(left_context, SyntaxKind::PragmaDirective) &&
        svfmt::IsInside(right_context, SyntaxKind::PragmaDirective))) {
     return {SpacingOptions::kPreserve,

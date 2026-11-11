@@ -62,18 +62,26 @@ build-dev while a corpus run uses it.
 ## Open items
 1. --try_wrap_long_lines is off by default (a style decision for the user).
    It wraps long single-partition lines (e.g. a long assign) that are
-   otherwise kept as they are. As of 2026-11-10 it is convergence-clean on
-   a 600-file sample (was 11 rejections): a trailing `define comment stays
-   on its line, no line break is introduced before ',' or an inline block
-   comment, and a line that overflows only because of its trailing comment,
-   or that the search cannot make fit, keeps its original spacing.
-   Cost: ~40% more formatting time on the sample.
-2. Known non-convergent leftovers (safe: rejected, input echoed; Verible has
+   otherwise kept as they are. Fixed on 2026-11-10/12: a trailing `define
+   comment (EOL or block) stays on its line, no line break is introduced
+   before ',' or an inline block comment, and a line that overflows only
+   because of its trailing comment, or that the search cannot make fit,
+   keeps its original spacing. Full corpus with the flag (2026-11-12):
+   0 semantic_change, but 20 not_idempotent (02: 4, 03: 2, 05: 14) and 1
+   timeout remain (safe: rejected); build-dev/full-trywrap/run_all.sh.
+   Cost: ~40% more formatting time.
+2. Safety checks (2026-11-12): besides the re-parse token comparison,
+   svfmt compares its final output with the original input using the raw
+   lexer check of src/lexeq (the same code as svfmt-lexcmp): inactive
+   `ifdef branches, `define/`pragma line ends, UDP tables. Before that, the
+   inactive-branch pre-pass and `define line ends were only checked by the
+   corpus runner.
+3. Known non-convergent leftovers (safe: rejected, input echoed; Verible has
    the same): `endif in the middle of a wrapped expression (VeeR
    beh_lib.sv), comments after "`else // c" (rv_tracer te_reg.sv), `infer`
    alignment flips on leading-comma lists and continued parameter lists,
    a comment line between "end" and "else".
-3. Style choices kept from Verible (reviewers keep reporting them): single
+4. Style choices kept from Verible (reviewers keep reporting them): single
    statements on the line of if/always/repeat when they fit, "module tb ();",
    enum members one per line, leading-comma lists indent the first element
    one more level, "type#(T)" in typedefs vs "type #(T)" in declarations,

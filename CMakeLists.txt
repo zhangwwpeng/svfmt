@@ -38,9 +38,16 @@ endif()
 file(GLOB_RECURSE VERIBLE_SOURCES CONFIGURE_DEPENDS src/verible/*.cc)
 file(GLOB_RECURSE SVFMT_SOURCES CONFIGURE_DEPENDS src/svfmt/*.cc)
 
+# Whitespace-only-difference check (raw lexer): run by svfmt on its own output
+# and by the svfmt-lexcmp tool of the corpus tests.
+add_library(svfmt_lexeq STATIC src/lexeq/lex-equivalence.cc)
+target_include_directories(svfmt_lexeq PUBLIC src)
+target_link_libraries(svfmt_lexeq PUBLIC slang::slang)
+
 add_library(svfmt_core STATIC ${VERIBLE_SOURCES} ${SVFMT_SOURCES})
 target_include_directories(svfmt_core PUBLIC src)
 target_link_libraries(svfmt_core PUBLIC
+  svfmt_lexeq
   slang::slang
   absl::check absl::die_if_null absl::log absl::status absl::statusor
   absl::strings absl::str_format absl::flags absl::flags_parse absl::flags_usage
@@ -50,9 +57,9 @@ target_link_libraries(svfmt_core PUBLIC
 add_executable(svfmt src/main.cpp)
 target_link_libraries(svfmt PRIVATE svfmt_core absl::log_initialize)
 
-# Independent whitespace-only-difference checker used by the corpus tests.
+# Whitespace-only-difference checker used by the corpus tests.
 add_executable(svfmt-lexcmp tools/lexcmp.cpp)
-target_link_libraries(svfmt-lexcmp PRIVATE slang::slang)
+target_link_libraries(svfmt-lexcmp PRIVATE svfmt_lexeq)
 
 if(SVFMT_BUILD_TESTS)
   enable_testing()
