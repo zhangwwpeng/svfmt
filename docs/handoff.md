@@ -8,20 +8,19 @@ commit); read this first when resuming.
   cannot be formatted safely is echoed unchanged (exit 1 with
   --failsafe_success=false). Since 2026-11-08 there is no Verible
   comparison; the style is our own, starting from Verible's.
-- Corpus ../sv_test (26.5k files, 01-09), last full run on 2026-11-13
-  (prior to the two final `try_wrap_long_lines` edits in `formatter.cc`);
-  `full` and `full-nvim` re-run on 2026-11-14 after the alignment fix in
-  item 7: 0 semantic_change, 0 crash, 0 timeout, 0 not_idempotent in both.
+- Corpus ../sv_test (26.5k files, 01-09), all three modes re-run on
+  2026-11-14 after the alignment fix in item 7: 0 semantic_change and
+  0 crash in all three.
   - `full-nvim` (`build-dev/full-nvim/run_all.sh`): 0 not_idempotent,
     0 timeout.
   - `full` (`build-dev/full/run_all.sh`): 0 not_idempotent, 0 timeout
     (the 3 `bp_cce*.sv` in `08-weird-syntax` are fixed, item 7).
-  - `full-trywrap` (`build-dev/full-trywrap/run_all.sh`): not re-run after
-    the item 7 fix; the previous run had 1 timeout and 22 not_idempotent
-    (the 3 `bp_cce*.sv` in 08, 4 in 02, 2 in 03, 13 in 05). The 3 in 08
-    and the 4 in 02 (`cv32e40p_decoder.sv`, `te_priority.sv`, two
-    `prim_sha2.sv`) are fixed and verified individually; the remaining 15
-    in 03/05 are diagnosed in item 1 below.
+  - `full-trywrap` (`build-dev/full-trywrap/run_all.sh`): re-run on
+    2026-11-14 after the item 7 fix: 0 semantic_change, 0 crash, 1 timeout
+    (`vtr .../koios/lenet.v`), 15 not_idempotent (03: 2, 05: 13). The 3
+    `bp_cce*.sv` in 08 and the 4 in 02 (`cv32e40p_decoder.sv`,
+    `te_priority.sv`, two `prim_sha2.sv`) are fixed; the remaining 15 are
+    diagnosed in item 1 below.
 - Remaining rejections in 01-08 were checked by hand: illegal on purpose
   (tests/corpus_expected_rejects.txt), tool dialects, slang strictness, or
   multi-file. 09 (LRM excerpts) is mostly prose; fragment mode was dropped
@@ -90,7 +89,11 @@ build-dev while a corpus run uses it.
    Remaining 15 `not_idempotent` files (all safe: rejected; 03: 2, 05: 13)
    share one root cause: pass 1 wraps inside a single `UnwrappedLine` with
    `wrap_spaces`, and the introduced `\n` makes `TreeUnwrapper` split them
-   into separate `UnwrappedLine`s at base indent on pass 2:
+   into separate `UnwrappedLine`s at base indent on pass 2. Re-run on
+   2026-11-14 after the item 7 fix: exactly these 15 (`nvdla` `memory.v`,
+   `fp_format_cvt.v`; `vtr` `mkDelayWorker32B.v` and 12
+   `vexriscv/*.v`), 1 timeout (`vtr` `koios/lenet.v`), 0
+   semantic_change / crash:
    - `/*...*/` followed on the same line by code (`nvdla/.../fp_format_cvt.v`)
      or `;` (`vtr/.../mkDelayWorker32B.v`);
    - `(* ... *)` followed on the same line by `wire ...` (12
