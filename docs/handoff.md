@@ -77,6 +77,9 @@ build-dev while a corpus run uses it.
 
 ## Open items
 1. --try_wrap_long_lines is off by default (a style decision for the user).
+   **Not being fixed (user decision, 2026-11-14):** the 15 remaining
+   `not_idempotent` files and 1 timeout below are accepted as known safe
+   rejections; the flag stays off by default.
    It wraps long single-partition lines (e.g. a long assign) that are
    otherwise kept as they are. Fixed on 2026-11-10..14: a trailing `define
    comment (EOL or block) stays on its line; no line break is introduced
