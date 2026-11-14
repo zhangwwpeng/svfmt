@@ -71,5 +71,7 @@ Debug flags: `--dump_cst` (the slang-derived tree),
 
 ## License
 
-Code under `src/verible/` comes from Verible (Apache-2.0) and is modified;
-see [NOTICE](NOTICE). slang is MIT.
+svfmt is licensed under the Apache License 2.0; see [LICENSE](LICENSE) and
+[NOTICE](NOTICE). Code under `src/verible/` comes from Verible (Apache-2.0)
+and is modified; `src/external_libs/editscript.h` is from diff-match-patch
+(Apache-2.0); slang is MIT.

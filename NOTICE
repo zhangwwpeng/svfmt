@@ -1,13 +1,21 @@
 svfmt
 =====
 
-src/verible/ and src/external_libs/ contain code from the Verible project
+svfmt itself is licensed under the Apache License 2.0; see LICENSE.
+
+src/verible/ contains code from the Verible project
 (https://github.com/chipsalliance/verible), Copyright The Verible Authors,
 licensed under the Apache License 2.0 (src/verible/LICENSE). Files under
 src/verible/verilog/formatting/ (align.cc, formatter.cc, token-annotator.cc,
 tree-unwrapper.cc, comment-controls.cc) and src/main.cpp were modified to run
 on slang's syntax tree; modified regions are marked "svfmt:".
 
-tests/verible_cases.jsonl is extracted from Verible's formatter tests.
+src/external_libs/editscript.h is from diff-match-patch
+(https://github.com/google/diff-match-patch), Copyright The diff-match-patch
+Authors, licensed under the Apache License 2.0.
 
-third_party/slang is slang (https://github.com/MikePopoloski/slang), MIT.
+third_party/slang is slang (https://github.com/MikePopoloski/slang), Copyright
+Michael Popoloski, licensed under the MIT License (third_party/slang/LICENSE).
+
+Build dependencies fetched by CMake: Abseil (Apache-2.0) and mimalloc (MIT,
+through slang).
