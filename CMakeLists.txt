@@ -61,6 +61,10 @@ target_link_libraries(svfmt PRIVATE svfmt_core absl::log_initialize)
 add_executable(svfmt-lexcmp tools/lexcmp.cpp)
 target_link_libraries(svfmt-lexcmp PRIVATE svfmt_lexeq)
 
+# Preprocessed-token-stream comparison used by tests/run_preproc_diff.py.
+add_executable(svfmt-preproc-cmp tools/preproc-cmp.cpp)
+target_link_libraries(svfmt-preproc-cmp PRIVATE slang::slang)
+
 if(SVFMT_BUILD_TESTS)
   enable_testing()
   add_test(NAME format_inputs
@@ -72,6 +76,17 @@ endif()
 if(SVFMT_BUILD_TESTS)
   # Corpus safety test (no comparison with Verible).
   find_package(Python3 COMPONENTS Interpreter)
+  if(Python3_FOUND)
+    # Differential preprocessor check and mutation test of the safety checks
+    # on the regression inputs (fast).
+    add_test(NAME preproc_diff
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_preproc_diff.py
+                     ${CMAKE_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/tests/inputs)
+    add_test(NAME mutation
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_mutation.py
+                     ${CMAKE_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/tests/inputs
+                     --mutations 6 --format)
+  endif()
   if(Python3_FOUND AND SVFMT_CORPUS_DIR)
     add_test(NAME corpus
              COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_corpus.py

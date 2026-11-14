@@ -48,6 +48,8 @@ cmake --build build -j && ctest --test-dir build        # golden tests
 tests/update_expected.sh build/svfmt                     # after an intended change
 sh build-dev/full/run_all.sh                             # corpus, default flags
 sh build-dev/full-nvim/run_all.sh                        # corpus, nvim flags
+python3 tests/run_preproc_diff.py build-dev tests/inputs  # preprocessor diff
+python3 tests/run_mutation.py build-dev tests/inputs --format  # mutation test
 build/svfmt --dump_cst x.sv; build/svfmt --show_token_partition_tree x.sv
 ```
 Corpus runs use --jobs 4 (the user found 8 too heavy). Don't rebuild
@@ -60,6 +62,12 @@ build-dev while a corpus run uses it.
   token-annotator, align, formatter); edit directly.
 - tools/lexcmp.cpp: the independent token-stream check used by the corpus
   runner.
+- tools/preproc-cmp.cpp: compares the preprocessed token streams of two
+  files under a define set (slang's own preprocessor); used by
+  tests/run_preproc_diff.py.
+- tests/run_preproc_diff.py, tests/run_mutation.py: the differential
+  preprocessor check and the mutation test; ctest targets `preproc_diff`
+  and `mutation` run them on tests/inputs.
 
 ## Decisions in force
 - Macro arguments are not formatted inside (spacing and line breaks between
@@ -152,11 +160,30 @@ build-dev while a corpus run uses it.
    Known leftovers (all safe: rejected, input echoed): --define macros and
    macros defined both ways across branches can be rejected; "`ifdef (X)"
    inside macro arguments; some `define continuations followed by block
-   comments. Hand-written scanners in slang-analyzer.cc (TabsToSpaces,
-   ScanConditionalDirectives, StubDefinitions) and the heuristic lexeq
-   check remain the main risk; the proposed next step is a differential
-   check against slang's own preprocessor (expanded token streams under
-   several define sets) plus mutation testing of corpus files.
+   comments.
+   Differential preprocessor check and mutation test (2026-11-14):
+   - tools/preproc-cmp.cpp (`svfmt-preproc-cmp`) compares the preprocessed
+     token streams of the input and the formatted output under a define set.
+     Macro-produced values (numbers/strings) are masked: `__LINE__/`__FILE__
+     and a moved macro call change them, and svfmt-lexcmp compares the macro
+     body and its arguments; identifiers pasted from `__LINE__ are masked.
+     UDP table bodies are blanked (the raw check compares them), including
+     "table ... endtable" on one line.
+   - tests/run_preproc_diff.py formats each file, derives define sets from
+     its `ifdef/`ifndef/`elsif guards (empty, all, each alone, and 0/16 for
+     `elsif), and reports the first differing token. Full corpus 01-09
+     (26,522 files): 0 differences.
+   - tests/run_mutation.py mutates files (delete/duplicate line, identifier,
+     number, operator, comment; whitespace-only indentation/trailing/blank)
+     and checks svfmt-lexcmp's verdict; with --format it also checks that
+     formatting a mutant never changes its token stream. 500-file sample,
+     10 mutants each: 0 failures.
+   - ctest targets `preproc_diff` and `mutation` run both on tests/inputs.
+   The check found no real lexeq hole; only masking gaps (UDP table on one
+   line, `__FILE__/`__LINE__ through nested macros and `line directives),
+   now handled. `__LINE__` is inherently line-dependent: formatting that
+   moves a line changes its expansion; that is not a raw token-stream change
+   and is masked.
 7. Default-flag regression fixed (2026-11-14): 3 files in `08-weird-syntax`
    (`black-parrot` `bp_cce.sv`, `bp_cce_msg.sv`, `bp_cce_wrapper.sv`) were
    `not_idempotent` under `infer` alignment. Cause:
