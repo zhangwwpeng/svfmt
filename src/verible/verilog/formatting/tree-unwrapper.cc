@@ -1627,16 +1627,18 @@ void TreeUnwrapper::SetIndentationsForOtherKinds(const SyntaxTreeNode &node,
       }
       const bool is_system_call = IsSystemCall(node);
       const bool is_call_argument =
-          svfmt::EnclosingListTag(Context()) == Tag(ListKind::ArgumentList_parameters);
+          svfmt::EnclosingListTag(Context()) == Tag(ListKind::ArgumentList_parameters) &&
+          !svfmt::IsInside(Context(), SyntaxKind::VariableDimension) &&
+          !svfmt::IsInside(Context(), SyntaxKind::ElementSelect);
       if ((in_statement_list || is_module_item) && is_system_call) {
         PushContextHint(ContextHint::kInsideStandaloneMacroCall);
         VisitIndentedSection(node, 0, PartitionPolicyEnum::kStack);
       } else if (is_statement && !is_system_call) {
         VisitIndentedSection(node, 0, PartitionPolicyEnum::kAppendFittingSubPartitions);
-      } else if (is_system_call && is_call_argument) {
-        // svfmt: a system call used as an argument ("f(..., $bits(x))") is a
+      } else if (is_call_argument) {
+        // svfmt: a call used as an argument ("f(..., $bits(x), g(y))") is a
         // unit when it fits; otherwise the wrap search can break right after
-        // "$bits(" and leave the argument at the outer list's column.
+        // "$bits(" / "g(" and leave the argument at the outer list's column.
         VisitIndentedSection(node, 0, PartitionPolicyEnum::kFitOnLineElseExpand);
       } else {
         TraverseChildren(node);

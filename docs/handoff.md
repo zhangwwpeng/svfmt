@@ -29,6 +29,10 @@ alignment commit); read this first when resuming.
   reviewed by vibe, findings checked and fixed by hand
   (reports/style-review-N, untracked; regression inputs
   tests/inputs/style_review*.sv, sv_constructs.sv).
+- A call used as an argument of another call (system or user) stays a unit
+  when it fits, instead of breaking after "$fn(" / "fn(" (2026-11-14;
+  tests/inputs/nested_system_call.sv, nested_call_argument.sv). Calls
+  inside dimensions are excluded, so `$clog2` in a port type is unchanged.
 
 ## Environment
 - Verible source (reference for porting): ~/workspace/ref/verible (085eef05);
