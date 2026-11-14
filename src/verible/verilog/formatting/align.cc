@@ -183,6 +183,24 @@ static bool StartsWithDirective(verible::FormatTokenRange range) {
   return IsPreprocessorKeyword(verilog_tokentype(e)) || e == svfmt::TK_SVFMT_DISABLED_TEXT;
 }
 
+// svfmt: a row with a directive after its first token ("input [7:0]
+// `endif a,"): aligning puts the row on one line, after the directive.
+static bool ContainsDirective(verible::FormatTokenRange range) {
+  if (range.empty()) return false;
+  // Directives without a token kind of their own read as macro names.
+  static constexpr std::string_view kLineDirectives[] = {
+      "`line", "`undefineall", "`resetall", "`celldefine", "`endcelldefine",
+      "`unconnected_drive", "`nounconnected_drive", "`begin_keywords", "`end_keywords"};
+  return std::any_of(range.begin() + 1, range.end(), [](const PreFormatToken &t) {
+    const int e = t.TokenEnum();
+    if (IsPreprocessorKeyword(verilog_tokentype(e)) || e == svfmt::TK_SVFMT_DISABLED_TEXT) {
+      return true;
+    }
+    return std::find(std::begin(kLineDirectives), std::end(kLineDirectives), t.Text()) !=
+           std::end(kLineDirectives);
+  });
+}
+
 // A row holding a struct/union body: aligning the row would put the whole
 // body on one line.
 static bool HasStructUnionBody(const TokenPartitionTree &partition) {
@@ -199,7 +217,7 @@ static bool IgnoreCommentsAndPreprocessingDirectives(
   if (!uwline.Origin()) return true;
 
   const auto token_range = uwline.TokensRange();
-  CHECK(!token_range.empty());
+  if (token_range.empty()) return true;  // svfmt: an empty partition is no row
   // ignore lines containing only comments
   if (TokensAreAllCommentsOrAttributes(token_range)) return true;
 
@@ -209,14 +227,14 @@ static bool IgnoreCommentsAndPreprocessingDirectives(
   if (HasStructUnionBody(partition)) return true;
 
   // ignore partitions belonging to preprocessing directives
-  return StartsWithDirective(token_range);
+  return StartsWithDirective(token_range) || ContainsDirective(token_range);
 }
 
 static bool IgnoreWithinPortDeclarationPartitionGroup(
     const TokenPartitionTree &partition) {
   const auto &uwline = partition.Value();
   const auto token_range = uwline.TokensRange();
-  CHECK(!token_range.empty());
+  if (token_range.empty()) return true;  // svfmt: an empty partition is no row
   if (IgnoreCommentsAndPreprocessingDirectives(partition)) return true;
 
   // Ignore .x or .x(x) port declarations.
@@ -228,6 +246,9 @@ static bool IgnoreWithinPortDeclarationPartitionGroup(
   if (uwline.Origin()->Kind() != verible::SymbolKind::kNode) return false;
   const auto &origin = verible::SymbolCastToNode(*uwline.Origin());
   const auto tag = origin.Tag().tag;
+  // svfmt: a macro call in a parameter or port list ("`FOO(x)") is not a
+  // row: its argument list would reserve a column and pad the other rows.
+  if (tag == static_cast<int>(SyntaxKind::MacroUsage)) return true;
   // svfmt: an ANSI port with no direction or type ("b" in "input logic a,
   // b") is aligned: its name goes under the names of the other ports.
   if (tag == static_cast<int>(SyntaxKind::ImplicitAnsiPort)) return false;
@@ -240,7 +261,7 @@ static bool IgnoreWithinStructUnionMemberPartitionGroup(
     const TokenPartitionTree &partition) {
   const auto &uwline = partition.Value();
   const auto token_range = uwline.TokensRange();
-  CHECK(!token_range.empty());
+  if (token_range.empty()) return true;  // svfmt: an empty partition is no row
   // TODO(mglb): Verify whether `IgnoreCommentsAndPreprocessingDirectives` can
   // be used instead of a direct comments/preprocessor tests (like in other
   // IgnoreWithin* functions). If so, use it.
@@ -251,11 +272,17 @@ static bool IgnoreWithinStructUnionMemberPartitionGroup(
   }
 
   // ignore partitions belonging to preprocessing directives
-  if (StartsWithDirective(token_range)) {
+  if (StartsWithDirective(token_range) || ContainsDirective(token_range)) {
     return true;
   }
 
   if (PartitionHasLeadingTokensBeforeForcedWrap(partition)) return true;
+
+  // svfmt: a macro call in a member list ("`FOO(x)") is not a row.
+  if (uwline.Origin() && uwline.Origin()->Kind() == verible::SymbolKind::kNode &&
+      uwline.Origin()->Tag().tag == static_cast<int>(SyntaxKind::MacroUsage)) {
+    return true;
+  }
 
   // ignore nested structs/unions
   return HasStructUnionBody(partition);
@@ -309,6 +336,13 @@ static bool TokenForcesLineBreak(const PreFormatToken &ftoken) {
   switch (ftoken.TokenEnum()) {
     case verilog_tokentype::TK_begin:
     case verilog_tokentype::TK_fork:
+    // svfmt: a nested case statement without begin ("1: case (s) ... endcase"),
+    // an if-else, and other block constructs expand.
+    case verilog_tokentype::TK_endcase:
+    case verilog_tokentype::TK_else:
+    case verilog_tokentype::TK_join:
+    case verilog_tokentype::TK_join_any:
+    case verilog_tokentype::TK_join_none:
       return true;
     default:
       return false;
@@ -469,12 +503,43 @@ class VerilogColumnSchemaScanner : public ColumnSchemaScanner {
     }
   }
 
+  // svfmt: whether a data type node starts with text of its own: any type
+  // but an implicit one, or an implicit one with "signed" / "unsigned"
+  // ("input signed [7:0] a").
+  static bool HasTypeText(const SyntaxTreeNode &type) {
+    if (KindOfSym(type) != SyntaxKind::ImplicitType) return true;
+    return !type.empty() && type.front() &&
+           type.front()->Kind() == verible::SymbolKind::kLeaf;
+  }
+
+  // svfmt: `dims` if all its elements are dimensions ("[7:0]"); a list with
+  // a macro ("`DIM [7:0]") gets no columns.
+  static const SyntaxTreeNode *AlignableDims(const SyntaxTreeNode *dims) {
+    if (dims == nullptr) return nullptr;
+    for (const auto &child : dims->children()) {
+      const SyntaxTreeNode *dim = AsNode(child.get());
+      if (dim && KindOfSym(*dim) != SyntaxKind::VariableDimension &&
+          KindOfSym(*dim) != SyntaxKind::ElementSelect) {
+        return nullptr;
+      }
+    }
+    return dims;
+  }
+
   // The dimensions list of a data type node (packed dimensions), if any.
   static const SyntaxTreeNode *PackedDimensions(const SyntaxTreeNode *type) {
+    return AlignableDims(AnyPackedDimensions(type));
+  }
+
+  static const SyntaxTreeNode *AnyPackedDimensions(const SyntaxTreeNode *type) {
     if (!type) return nullptr;
     // slang reads "user_t [7:0]" as a name with selectors.
     if (KindOfSym(*type) == SyntaxKind::NamedType && !type->empty()) {
       const SyntaxTreeNode *name = AsNode(type->front().get());
+      // "pkg::user_t [7:0]": the selectors are on the last part of the name.
+      while (name && KindOfSym(*name) == SyntaxKind::ScopedName && !name->empty()) {
+        name = AsNode(name->back().get());
+      }
       if (name && KindOfSym(*name) == SyntaxKind::IdentifierSelectName) {
         return ChildWithTag(*name, ListKind::IdentifierSelectName_selectors);
       }
@@ -572,7 +637,7 @@ class PortDeclarationColumnSchemaScanner : public VerilogColumnSchemaScanner {
         }
         const auto *type = AsNode(child.get());
         if (!type) continue;
-        if (!have_type_column && KindOfSym(*type) != SyntaxKind::ImplicitType) {
+        if (!have_type_column && HasTypeText(*type)) {
           ReserveNewColumn(*type, FlushLeft, {1});
           have_type_column = true;
         }
@@ -586,7 +651,7 @@ class PortDeclarationColumnSchemaScanner : public VerilogColumnSchemaScanner {
     }
     if (declarator && !declarator->empty()) {
       ReserveNewColumn(*declarator->front(), FlushLeft, {3});
-      if (const auto *dims = ChildWithTag(*declarator, ListKind::Declarator_dimensions)) {
+      if (const auto *dims = AlignableDims(ChildWithTag(*declarator, ListKind::Declarator_dimensions))) {
         auto *group = ReserveNewColumn(*dims, FlushLeft, {4});
         ReserveDimensions(group, *dims, {4},
                           style_.port_declarations_right_align_unpacked_dimensions);
@@ -666,9 +731,12 @@ class DataDeclarationColumnSchemaScanner : public VerilogColumnSchemaScanner {
       // NetDeclaration: the data type is a direct child.
       for (const auto &child : node->children()) {
         const auto *n = AsNode(child.get());
+        // svfmt: the data type, not the strength before it or the delay
+        // after it ("wire [3:0] #5 b;").
         if (n && !svfmt::IsListTag(n->Tag().tag) &&
-            KindOfSym(*n) != SyntaxKind::Declarator) {
+            KindOfSym(*n) != SyntaxKind::Declarator && PackedDimensions(n) != nullptr) {
           type = n;
+          break;
         }
       }
     }
@@ -680,7 +748,7 @@ class DataDeclarationColumnSchemaScanner : public VerilogColumnSchemaScanner {
     const auto *declarator = AsNode(list->front().get());
     if (!declarator || declarator->empty()) return;
     ReserveNewColumn(*declarator, FlushLeft, {2});
-    if (const auto *dims = ChildWithTag(*declarator, ListKind::Declarator_dimensions)) {
+    if (const auto *dims = AlignableDims(ChildWithTag(*declarator, ListKind::Declarator_dimensions))) {
       // svfmt: a lone unpacked dimension ("data[$]") is not pushed to the end
       // of the widest row.
       AlignmentColumnProperties props = FlushLeft;
@@ -718,8 +786,16 @@ class ParameterDeclarationColumnSchemaScanner : public VerilogColumnSchemaScanne
 
  protected:
   void Visit(const SyntaxTreeNode &origin) final {
+    // svfmt: only parameter declarations have these columns; a macro call or
+    // any other row in the group ("`FOO(x)") must not reserve them.
+    const SyntaxKind kind = KindOfSym(origin);
+    if (kind != SyntaxKind::ParameterDeclarationStatement &&
+        kind != SyntaxKind::ParameterDeclaration &&
+        kind != SyntaxKind::TypeParameterDeclaration) {
+      return;
+    }
     const SyntaxTreeNode *node = &origin;
-    if (KindOfSym(origin) == SyntaxKind::ParameterDeclarationStatement) {
+    if (kind == SyntaxKind::ParameterDeclarationStatement) {
       node = AsNode(origin.front().get());
       if (!node) return;
     }
@@ -743,7 +819,7 @@ class ParameterDeclarationColumnSchemaScanner : public VerilogColumnSchemaScanne
         declarators = n;
         continue;
       }
-      if (!have_type && KindOfSym(*n) != SyntaxKind::ImplicitType) {
+      if (!have_type && HasTypeText(*n)) {
         ReserveNewColumn(*n, FlushLeft, {1});
         have_type = true;
       }
@@ -755,7 +831,7 @@ class ParameterDeclarationColumnSchemaScanner : public VerilogColumnSchemaScanne
     const auto *declarator = AsNode(declarators->front().get());
     if (!declarator || declarator->empty()) return;
     ReserveNewColumn(*declarator->front(), FlushLeft, {3});
-    if (const auto *dims = ChildWithTag(*declarator, ListKind::Declarator_dimensions)) {
+    if (const auto *dims = AlignableDims(ChildWithTag(*declarator, ListKind::Declarator_dimensions))) {
       auto *group = ReserveNewColumn(*dims, FlushLeft, {4});
       ReserveDimensions(group, *dims, {4}, false);
     }
@@ -950,6 +1026,20 @@ static std::vector<TaggedTokenPartitionRange> GetConsecutiveModuleItemGroups(
         // Align body-level parameter/localparam declarations.
         if (node.MatchesTagAnyOf({SyntaxKind::ParameterDeclarationStatement,
                                   SyntaxKind::ParameterDeclaration})) {
+          // svfmt: only one name per declaration ("localparam A = 1, B = 2;"
+          // over two lines would be put on one line).
+          const SyntaxTreeNode *decl =
+              node.MatchesTag(SyntaxKind::ParameterDeclarationStatement) && !node.empty()
+                  ? AsNode(node.front().get())
+                  : &node;
+          const SyntaxTreeNode *names =
+              decl ? ChildWithTag(*decl, ListKind::ParameterDeclaration_declarators) : nullptr;
+          if (names == nullptr && decl != nullptr) {
+            names = ChildWithTag(*decl, ListKind::TypeParameterDeclaration_declarators);
+          }
+          if (names != nullptr && CountChildNodes(names) > 1) {
+            return AlignClassify(AlignmentGroupAction::kNoMatch);
+          }
           return AlignClassify(
               AlignmentGroupAction::kMatch,
               AlignableSyntaxSubtype::kBodyParameterDeclaration);

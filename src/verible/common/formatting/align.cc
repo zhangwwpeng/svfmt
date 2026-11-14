@@ -1108,7 +1108,14 @@ std::vector<TokenPartitionIterator> FilterAlignablePartitions(
   qualified_partitions.reserve(range.size());
   // like std::copy_if, but we want the iterators, not their pointees.
   for (auto iter = range.begin(); iter != range.end(); ++iter) {
-    if (!ignore_partition_predicate(*iter)) {
+    // svfmt: a row with a forced line break inside ("f(1,  // c" then "2);")
+    // spans several lines; aligning it would join them.
+    const auto tokens = iter->Value().TokensRange();
+    const bool multiline =
+        !tokens.empty() && std::any_of(tokens.begin() + 1, tokens.end(), [](const PreFormatToken &t) {
+          return t.before.break_decision == SpacingOptions::kMustWrap;
+        });
+    if (!multiline && !ignore_partition_predicate(*iter)) {
       VLOG(2) << "including partition: " << *iter;
       qualified_partitions.push_back(iter);
     } else {

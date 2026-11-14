@@ -122,9 +122,11 @@ static bool NodeIsBeginEndBlock(const SyntaxTreeNode &node) {
          Kind(node) == SyntaxKind::GenerateBlock;
 }
 
-static const SyntaxTreeNode &GetBlockEnd(const SyntaxTreeNode &block) {
+// The 'end' of a begin-end block; nullptr when it comes from a macro
+// expansion (svfmt: the file then has no 'end' token for it).
+static const SyntaxTreeNode *GetBlockEnd(const SyntaxTreeNode &block) {
   CHECK(NodeIsBeginEndBlock(block));
-  return *ABSL_DIE_IF_NULL(FindChildNode(block, static_cast<int>(GroupKind::kEnd)));
+  return FindChildNode(block, static_cast<int>(GroupKind::kEnd));
 }
 
 static const verible::Symbol *GetEndLabel(const SyntaxTreeNode &end_node) {
@@ -1008,6 +1010,7 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
       case ListKind::CaseGenerate_items:
       case ListKind::ClassDeclaration_items:
       case ListKind::ModuleDeclaration_members:
+      case ListKind::CheckerDeclaration_members:
       case ListKind::GenerateBlock_members:
       case ListKind::GenerateRegion_members:
       case ListKind::DistConstraintList_items:
@@ -1169,6 +1172,9 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
           VisitIndentedSection(node, style_.wrap_spaces, PartitionPolicyEnum::kWrap);
           return;
         }
+        // svfmt: a call in declared dimensions ("[$clog2(W)-1:0]") stays
+        // on the line of its declaration.
+        if (svfmt::IsInside(Context(), SyntaxKind::VariableDimension)) break;
         // svfmt: also "$error(...)" as a module / generate item, and "new(...)".
         if (AncestorKind(Context()) == SyntaxKind::ArgumentList &&
             (AncestorKind(Context(), 1) == SyntaxKind::InvocationExpression ||
@@ -1348,6 +1354,19 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
     case SyntaxKind::DistItem:
     case SyntaxKind::StructUnionMember:
     case SyntaxKind::NetDeclaration:
+    // svfmt: "rand bit a;" in a checker is one item: the declaration inside
+    // it does not start a line of its own.
+    case SyntaxKind::DataDeclaration:
+      if (AncestorKind(Context()) == SyntaxKind::CheckerDataDeclaration) {
+        TraverseChildren(node);
+      } else {
+        // svfmt: an item of a generate case item goes one level in when it is
+        // on the line after the label (as in the group below).
+        const int indent = IsCaseItemKind(AncestorKind(Context())) ? style_.indentation_spaces : 0;
+        VisitIndentedSection(node, indent, PartitionPolicyEnum::kFitOnLineElseExpand);
+      }
+      break;
+
     case SyntaxKind::PortDeclaration:
     case SyntaxKind::AlwaysBlock:
     case SyntaxKind::AlwaysCombBlock:
@@ -1377,7 +1396,7 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
     case SyntaxKind::ProgramHeader:
     case SyntaxKind::PackageHeader:
     case SyntaxKind::BindDirective:
-    case SyntaxKind::DataDeclaration:
+    case SyntaxKind::CheckerDataDeclaration:
     case SyntaxKind::HierarchyInstantiation:
     case SyntaxKind::PrimitiveInstantiation:
     case SyntaxKind::ModportDeclaration:
@@ -1450,6 +1469,7 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
     // partitions:
     case SyntaxKind::CovergroupDeclaration:
     case SyntaxKind::ModuleDeclaration:
+    case SyntaxKind::CheckerDeclaration:
     case SyntaxKind::ProgramDeclaration:
     case SyntaxKind::PackageDeclaration:
     case SyntaxKind::InterfaceDeclaration:
@@ -1637,7 +1657,13 @@ void TreeUnwrapper::SetIndentationsForOtherKinds(const SyntaxTreeNode &node,
       const bool is_value = !is_standalone_call && node.size() == 1 && node.front() &&
                             node.front()->Kind() == verible::SymbolKind::kLeaf &&
                             !svfmt::IsListTag(parent) && !svfmt::IsGroupTag(parent);
-      if (is_value) {
+      // svfmt: the arguments of a line-oriented directive ("`line `N `f(x) 1")
+      // stay on the directive's line.
+      const bool in_directive = svfmt::IsInsideAnyOf(
+          Context(), {SyntaxKind::LineDirective, SyntaxKind::IncludeDirective,
+                      SyntaxKind::TimeScaleDirective, SyntaxKind::DefaultNetTypeDirective,
+                      SyntaxKind::PragmaDirective});
+      if (is_value || in_directive) {
         TraverseChildren(node);
       } else if (is_nested_call && HasContextHint(ContextHint::kInsideStandaloneMacroCall)) {
         VisitIndentedSection(node, indent, PartitionPolicyEnum::kStack);
@@ -1972,6 +1998,10 @@ static void AttachTrailingSemicolonToPreviousPartition(
   // be a semicolon where one is grammatically expected.
   // In those cases, do nothing.
   auto *semicolon_partition = &RightmostDescendant(*partition);
+  // svfmt: a construct whose only token is the ';' (the rest came from a
+  // macro, "`DECL(a)" then ";" on the next line) has nothing of its own to
+  // attach it to; the previous leaf is in another subtree.
+  if (semicolon_partition == &LeftmostDescendant(*partition)) return;
   if (PartitionStartsWithSemicolon(*semicolon_partition)) {
     // When the semicolon is forced to wrap (e.g. when previous partition ends
     // with EOL comment), wrap previous partition with a group and append the
@@ -1998,6 +2028,33 @@ static bool PartitionIsAllComments(const TokenPartitionTree &partition) {
   return !tokens.empty() && std::all_of(tokens.begin(), tokens.end(), [](const PreFormatToken &t) {
     return IsComment(verilog_tokentype(t.TokenEnum()));
   });
+}
+
+// svfmt: comment lines before a statement ("// c" then "`ASSERT(a);") are
+// lines of their own: the statement's partitions move under a node that
+// keeps the statement's policy, so that the comment does not take part in
+// it (appending after a comment wraps every following partition).
+// With `flatten`, the statement becomes one leaf. Returns false if there
+// are no comment lines.
+static bool SeparateLeadingComments(TokenPartitionTree *partition, bool flatten = false) {
+  auto &children = partition->Children();
+  size_t first = 0;
+  while (first + 1 < children.size() && is_leaf(children[first]) &&
+         PartitionIsAllComments(children[first])) {
+    ++first;
+  }
+  if (first == 0 || (!flatten && children.size() - first < 2)) return first > 0;
+  verible::UnwrappedLine uwline = children[first].Value();
+  uwline.SpanUpToToken(partition->Value().TokensRange().end());
+  uwline.SetPartitionPolicy(partition->Value().PartitionPolicy());
+  TokenPartitionTree group(uwline);
+  for (size_t i = first; !flatten && i < children.size(); ++i) {
+    group.Children().push_back(std::move(children[i]));
+  }
+  children.erase(children.begin() + first, children.end());
+  children.push_back(std::move(group));
+  partition->Value().SetPartitionPolicy(PartitionPolicyEnum::kAlwaysExpand);
+  return true;
 }
 
 // svfmt: `first` skips leading partitions (comment lines before the
@@ -2088,7 +2145,17 @@ static void ReshapeIfClause(const SyntaxTreeNode &node,
   if (partition.Children().size() < 2) return;
   // Then fuse the 'begin' partition with the preceding 'if (...)'
   auto &if_body_partition = partition.Children().back();
+  // svfmt: the block may be a single line (e.g. "begin : `LABEL_END" with
+  // the 'end' from a macro), with no 'begin' partition of its own.
+  if (is_leaf(if_body_partition)) return;
   auto &begin_partition = if_body_partition.Children().front();
+  // svfmt: a 'begin' from a macro ("`IF_BEGIN(c)") is not in the file: the
+  // first partition is then the block's statements.
+  const auto begin_tokens = begin_partition.Value().TokensRange();
+  if (!is_leaf(begin_partition) || begin_tokens.empty() ||
+      begin_tokens.front().TokenEnum() != TK_begin) {
+    return;
+  }
   verible::MergeLeafIntoPreviousLeaf(&begin_partition);
   partition.Value().SetPartitionPolicy(
       if_body_partition.Value().PartitionPolicy());
@@ -2175,7 +2242,12 @@ static void PushEndIntoElsePartition(TokenPartitionTree *partition_ptr) {
   // Do not flatten, so that if- and else- clauses can make formatting
   // decisions independently from each other.
   auto &partition = *partition_ptr;
-  auto &if_clause_partition = partition.Children().front();
+  // svfmt: a statement label kept on a line of its own ("L:  // c" then
+  // "if (a) begin") comes before the if clause.
+  auto &children = partition.Children();
+  size_t if_index = 0;
+  while (if_index + 2 < children.size() && is_leaf(children[if_index])) ++if_index;
+  auto &if_clause_partition = children[if_index];
   auto *end_partition = &RightmostDescendant(if_clause_partition);
   // When 'end' carries a trailing EOL comment, 'else' must start on the next
   // line (see token annotator: comment before else => MustWrap). Merging
@@ -2217,7 +2289,12 @@ static void MergeEndElseWithoutLabel(const SyntaxTreeNode &conditional,
     return;
   }
   VLOG(4) << "if body was a begin-end block";
-  const auto *end_label = GetEndLabel(GetBlockEnd(*if_body_subnode));
+  const SyntaxTreeNode *block_end = GetBlockEnd(*if_body_subnode);
+  if (block_end == nullptr) {
+    VLOG(4) << "'end' comes from a macro, no merge";
+    return;
+  }
+  const auto *end_label = GetEndLabel(*block_end);
   if (end_label != nullptr) {
     VLOG(4) << "'end' came with label, no merge";
     return;
@@ -2342,6 +2419,15 @@ static void ReshapeConditionalConstruct(const SyntaxTreeNode &conditional,
   // svfmt: "if (...) x;" may come from a macro expansion, leaving only the
   // else clause in this file.
   if (GetAnyConditionalIfClause(conditional) == nullptr) return;
+  // svfmt: a statement label ("L: if (a) begin") joins the if header, so
+  // that the if clause is the first partition, as without a label.
+  if (FindChildNode(conditional, static_cast<int>(SyntaxKind::NamedLabel)) != nullptr) {
+    auto &children = partition_ptr->Children();
+    if (children.size() > 2 && is_leaf(children.front()) && !is_leaf(children[1]) &&
+        !PartitionIsForcedIntoNewLine(LeftmostDescendant(children[1]))) {
+      verible::MergeLeafIntoNextLeaf(&children.front());
+    }
+  }
   VLOG(4) << "there was an else clause";
   if (!style.wrap_end_else_clauses) {
     MergeEndElseWithoutLabel(conditional, partition_ptr);
@@ -2443,6 +2529,12 @@ class MacroCallReshaper {
     if (!FindInitialPartitions()) {
       // Something went wrong, leave partitions intact. Log message has been
       // printed.
+      return;
+    }
+    // svfmt: a comment between the macro name and "(" ("`FOO // c" then
+    // "(1)") puts the "(" on a new line: leave the partitions as they are.
+    if ((paren_group_ != nullptr && PartitionIsForcedIntoNewLine(*paren_group_)) ||
+        (l_paren_ != nullptr && PartitionIsForcedIntoNewLine(*l_paren_))) {
       return;
     }
 
@@ -2891,12 +2983,16 @@ static void IndentBetweenUVMBeginEndMacros(TokenPartitionTree *partition_ptr,
   for (auto *itr = PreviousSibling(partition); itr;
        itr = PreviousSibling(*itr)) {
     VLOG(4) << "Scanning previous sibling:\n" << *itr;
-    const auto macroId =
-        LeftmostDescendant(*itr).Value().TokensRange().front().Text();
+    // svfmt: a partition may be left without tokens by reshaping.
+    const auto sibling_tokens = LeftmostDescendant(*itr).Value().TokensRange();
+    if (sibling_tokens.empty()) continue;
+    const auto macroId = sibling_tokens.front().Text();
     VLOG(4) << "macro id: " << macroId;
 
-    // Indent only uvm macros
+    // svfmt: everything between the macros goes in (comment lines too, not
+    // only the uvm macros); only the uvm macros count levels.
     if (!absl::StartsWith(macroId, "`uvm_")) {
+      uvm_range.push_back(itr);
       continue;
     }
 
@@ -3005,8 +3101,12 @@ static void HandleDataDeclaration(const SyntaxTreeNode &node,
       // first pass (comment on its own line): keep them apart.
       const auto &left = data_declaration_partition.Children()[fuse_position];
       const auto left_tokens = left.Value().TokensRange();
-      if (left_tokens.empty() ||
-          left_tokens.back().TokenEnum() != verilog_tokentype::TK_EOL_COMMENT) {
+      // svfmt: only two leaves can be fused (a type from a macro call with
+      // arguments, "`T(a, b) x;", leaves its argument list as a subtree).
+      const auto &right = data_declaration_partition.Children()[fuse_position + 1];
+      if ((left_tokens.empty() ||
+           left_tokens.back().TokenEnum() != verilog_tokentype::TK_EOL_COMMENT) &&
+          is_leaf(left) && is_leaf(right)) {
         MergeConsecutiveSiblings(&data_declaration_partition, fuse_position);
       }
     } else {
@@ -3063,18 +3163,49 @@ static void ExpandTaskPortsIfTooLong(const FormatStyle &style, TokenPartitionTre
   }
 }
 
+// svfmt: merges `leaf` into the leaf before it, unless `leaf` is the first
+// leaf of `partition` (the start of the construct came from a macro, "`F" with
+// "foo(" and ");" on the next line): that leaf is in another subtree, and
+// merging across subtrees breaks the partition ranges.
+static void MergeLeafIntoPreviousLeafWithin(TokenPartitionTree &partition,
+                                            TokenPartitionTree *leaf) {
+  if (leaf == &LeftmostDescendant(partition)) return;
+  verible::MergeLeafIntoPreviousLeaf(leaf);
+}
+
+// svfmt: GroupLeafWithPreviousLeaf, with the same guard (nullptr if none).
+static TokenPartitionTree *GroupLeafWithPreviousLeafWithin(TokenPartitionTree &partition,
+                                                           TokenPartitionTree *leaf) {
+  if (leaf == &LeftmostDescendant(partition)) return nullptr;
+  return verible::GroupLeafWithPreviousLeaf(leaf);
+}
+
 static void MergeLeadingLeafPartitions(TokenPartitionTree *partition) {
   auto &children = partition->Children();
   size_t k = 0;
   while (k < children.size() && is_leaf(children[k])) ++k;
   if (k == children.size()) {
     // A port list of one port may be a leaf too ("f(P)" in the return type
-    // splits the header): the header ends at the last opening paren.
-    k = 0;
-    for (size_t i = 0; i + 1 < children.size(); ++i) {
-      if (PartitionEndsWithOpenParen(children[i])) k = i + 1;
+    // splits the header): the header ends at the port list's '(', the first
+    // one outside brackets ("[$clog2(W)-1:0]" is inside them). svfmt: when
+    // no partition ends there (no port list, or only a comment in it), the
+    // header is one line.
+    k = children.size();
+    int depth = 0;
+    bool found = false;
+    for (size_t i = 0; i < children.size() && !found; ++i) {
+      const auto tokens = children[i].Value().TokensRange();
+      for (auto it = tokens.begin(); it != tokens.end(); ++it) {
+        const int e = it->TokenEnum();
+        if (e == '(' && depth == 0) {
+          found = true;
+          if (it + 1 == tokens.end() && i + 1 < children.size()) k = i + 1;
+          break;
+        }
+        if (e == '(' || e == '[' || e == '{') ++depth;
+        if ((e == ')' || e == ']' || e == '}') && depth > 0) --depth;
+      }
     }
-    if (k == 0) return;  // no port list
   }
   for (size_t i = k; i-- > 1;) verible::MergeLeafIntoPreviousLeaf(&children[i]);
 }
@@ -3176,12 +3307,37 @@ void TreeUnwrapper::ReshapeTokenPartitions(
           auto &last_prev = *ABSL_DIE_IF_NULL(PreviousSibling(last));
           if (PartitionStartsWithCloseParen(last) &&
               PartitionEndsWithOpenParen(last_prev)) {
-            verible::MergeLeafIntoPreviousLeaf(&last);
+            MergeLeafIntoPreviousLeafWithin(partition, &last);
           }
         }
         break;
       }
       case GroupKind::kSubroutineHeader: {
+        // svfmt: a call in a port's type ("input logic [$clog2(W)-1:0] p")
+        // splits the port into partitions; a port is one piece.
+        verible::ApplyPreOrder(partition, std::function<void(TokenPartitionTree &)>([](TokenPartitionTree &p) {
+          const auto *origin = p.Value().Origin();
+          // A single port (a list of one port has no ',' outside brackets).
+          if (origin == nullptr || is_leaf(p) ||
+              (origin->Tag() != NodeTag(SyntaxKind::FunctionPort) &&
+               origin->Tag().tag != Tag(ListKind::FunctionPortList_ports))) {
+            return;
+          }
+          const auto &kids = p.Children();
+          if (!std::all_of(kids.begin(), kids.end(),
+                           [](const TokenPartitionTree &k) { return is_leaf(k); })) {
+            return;
+          }
+          int depth = 0;
+          for (const auto &t : p.Value().TokensRange()) {
+            const int e = t.TokenEnum();
+            if (e == '(' || e == '[' || e == '{') ++depth;
+            if ((e == ')' || e == ']' || e == '}') && depth > 0) --depth;
+            if (e == ',' && depth == 0) return;
+            if (e == TK_EOL_COMMENT) return;  // its line breaks stay
+          }
+          p.Children().clear();
+        }));
         MergeLeadingLeafPartitions(&partition);
         // May end up with a trailing ");" subpartition; attach it to the item
         // that preceded it. svfmt: not for a task, whose ");" closes the port
@@ -3190,7 +3346,7 @@ void TreeUnwrapper::ReshapeTokenPartitions(
         if (IsTaskHeader(node)) {
           ExpandTaskPortsIfTooLong(style, &partition);
         } else if (PartitionIsCloseParenSemi(last)) {
-          verible::MergeLeafIntoPreviousLeaf(&last);
+          MergeLeafIntoPreviousLeafWithin(partition, &last);
         }
         break;
       }
@@ -3226,6 +3382,11 @@ void TreeUnwrapper::ReshapeTokenPartitions(
       case SyntaxKind::HierarchyInstantiation:
         HandleDataDeclaration(node, style, &partition);
         break;
+      // svfmt: comment lines before "rand bit a;" in a checker are lines of
+      // their own; the declaration keeps its layout.
+      case SyntaxKind::CheckerDataDeclaration:
+        SeparateLeadingComments(&partition);
+        break;
 
       case SyntaxKind::DPIImport:
       case SyntaxKind::DPIExport: {
@@ -3253,7 +3414,7 @@ void TreeUnwrapper::ReshapeTokenPartitions(
         if (IsTaskHeader(node)) {
           ExpandTaskPortsIfTooLong(style, &partition);
         } else if (PartitionIsCloseParenSemi(last)) {
-          verible::MergeLeafIntoPreviousLeaf(&last);
+          MergeLeafIntoPreviousLeafWithin(partition, &last);
         }
         break;
       }
@@ -3266,7 +3427,7 @@ void TreeUnwrapper::ReshapeTokenPartitions(
           auto &last_prev = *ABSL_DIE_IF_NULL(PreviousSibling(last));
           if (PartitionStartsWithCloseParen(last) &&
               PartitionEndsWithOpenParen(last_prev)) {
-            verible::MergeLeafIntoPreviousLeaf(&last);
+            MergeLeafIntoPreviousLeafWithin(partition, &last);
           }
         }
         // If there were any parameters or ports at all, expand.
@@ -3284,10 +3445,11 @@ void TreeUnwrapper::ReshapeTokenPartitions(
           if (PartitionStartsWithCloseParen(last) || PartitionStartsWithSemicolon(last)) {
             auto &token = last.Value().TokensRange().front();
             if (token.before.break_decision == verible::SpacingOptions::kMustWrap) {
-              auto *group = verible::GroupLeafWithPreviousLeaf(&last);
-              group->Value().SetPartitionPolicy(PartitionPolicyEnum::kStack);
+              if (auto *group = GroupLeafWithPreviousLeafWithin(partition, &last)) {
+                group->Value().SetPartitionPolicy(PartitionPolicyEnum::kStack);
+              }
             } else {
-              verible::MergeLeafIntoPreviousLeaf(&last);
+              MergeLeafIntoPreviousLeafWithin(partition, &last);
             }
           }
         } else if (policy == PartitionPolicyEnum::kStack) {
@@ -3308,17 +3470,21 @@ void TreeUnwrapper::ReshapeTokenPartitions(
               FindChildNode(*paren, static_cast<int>(GroupKind::kMacroArgList)) == nullptr;
           if (no_args) {
             // If there are no call args, join the name, '(' and ')' together.
-            partition.Children().clear();
+            // svfmt: comment lines before it stay lines of their own.
+            if (!SeparateLeadingComments(&partition, /*flatten=*/true)) {
+              partition.Children().clear();
+            }
           } else {
             // Merge closing parenthesis into last argument partition
             auto &last = RightmostDescendant(partition);
             if (PartitionStartsWithCloseParen(last) || PartitionIsCloseParenSemi(last)) {
               auto &token = last.Value().TokensRange().front();
               if (token.before.break_decision == verible::SpacingOptions::kMustWrap) {
-                auto *group = verible::GroupLeafWithPreviousLeaf(&last);
-                group->Value().SetPartitionPolicy(PartitionPolicyEnum::kStack);
+                if (auto *group = GroupLeafWithPreviousLeafWithin(partition, &last)) {
+                  group->Value().SetPartitionPolicy(PartitionPolicyEnum::kStack);
+                }
               } else {
-                verible::MergeLeafIntoPreviousLeaf(&last);
+                MergeLeafIntoPreviousLeafWithin(partition, &last);
               }
             }
           }
@@ -3333,6 +3499,10 @@ void TreeUnwrapper::ReshapeTokenPartitions(
                DirectParentTag(Context()) == Tag(ListKind::CompilationUnit_members))) {
             IndentBetweenUVMBeginEndMacros(&partition, style.indentation_spaces);
           }
+        }
+        if (partition.Value().PartitionPolicy() ==
+            PartitionPolicyEnum::kAppendFittingSubPartitions) {
+          SeparateLeadingComments(&partition);
         }
         break;
       }
@@ -3361,7 +3531,7 @@ void TreeUnwrapper::ReshapeTokenPartitions(
       case SyntaxKind::DefineDirective: {
         auto &last = RightmostDescendant(partition);
         if (PartitionStartsWithCloseParen(last)) {
-          verible::MergeLeafIntoPreviousLeaf(&last);
+          MergeLeafIntoPreviousLeafWithin(partition, &last);
         }
         break;
       }
@@ -3374,7 +3544,7 @@ void TreeUnwrapper::ReshapeTokenPartitions(
         if (partition.Children().size() == 2) {
           auto &last = RightmostDescendant(partition);
           if (PartitionIsCloseBrace(last)) {
-            verible::MergeLeafIntoPreviousLeaf(&last);
+            MergeLeafIntoPreviousLeafWithin(partition, &last);
           }
         }
         break;
@@ -3484,10 +3654,14 @@ void TreeUnwrapper::ReshapeTokenPartitions(
           auto &seq_block_partition = partition.Children().back();
           auto &begin_partition = LeftmostDescendant(seq_block_partition);
           CHECK(is_leaf(begin_partition));
-          verible::MergeLeafIntoPreviousLeaf(&begin_partition);
-          // Flatten only the statement block so that the control partition
-          // can retain its own partition policy.
-          FlattenOneChild(partition, verible::BirthRank(seq_block_partition));
+          // svfmt: only a 'begin' written in the file (not from a macro).
+          const auto begin_tokens = begin_partition.Value().TokensRange();
+          if (!begin_tokens.empty() && begin_tokens.front().TokenEnum() == TK_begin) {
+            verible::MergeLeafIntoPreviousLeaf(&begin_partition);
+            // Flatten only the statement block so that the control partition
+            // can retain its own partition policy.
+            FlattenOneChild(partition, verible::BirthRank(seq_block_partition));
+          }
         } else if (partition.Children().size() > 1 && !verible::is_leaf(partition.Children().back()) &&
                    body != nullptr && body->Tag().tag == static_cast<int>(SyntaxKind::TimingControlStatement) &&
                    LastChildNode(*body) != nullptr && NodeIsBeginEndBlock(*LastChildNode(*body))) {
@@ -3501,13 +3675,39 @@ void TreeUnwrapper::ReshapeTokenPartitions(
             verible::MergeLeafIntoPreviousLeaf(&first);
             FlattenOneChild(partition, verible::BirthRank(timed_partition));
           }
+        } else if (IsCaseItemKind(kind) && partition.Children().size() > 1 &&
+                   !verible::is_leaf(partition.Children().back()) && body != nullptr &&
+                   (Kind(*body) == SyntaxKind::CaseStatement ||
+                    Kind(*body) == SyntaxKind::RandCaseStatement ||
+                    Kind(*body) == SyntaxKind::ConditionalStatement ||
+                    Kind(*body) == SyntaxKind::ForLoopStatement ||
+                    Kind(*body) == SyntaxKind::ForeachLoopStatement ||
+                    Kind(*body) == SyntaxKind::LoopStatement ||
+                    Kind(*body) == SyntaxKind::ForeverStatement ||
+                    Kind(*body) == SyntaxKind::DoWhileStatement)) {
+          // svfmt: a statement of several lines ("1:" then "case (s) ...
+          // endcase" or an if-else) goes one level in below its label.
+          AdjustIndentationRelative(&partition.Children().back(), style.indentation_spaces);
         }
         break;
       }
 
       case SyntaxKind::DoWhileStatement: {
         const auto *body = FindChildNode(node, static_cast<int>(SyntaxKind::SequentialBlockStatement));
-        if (body != nullptr && partition.Children().size() > 1) {
+        // svfmt: only the plain shape [do] [begin ... end] [while (...);];
+        // a comment line after 'do', or an 'end' / 'while' from a macro, is
+        // left as it is.
+        const auto first_token = [](const TokenPartitionTree &p) {
+          const auto tokens = p.Value().TokensRange();
+          return tokens.empty() ? 0 : tokens.front().TokenEnum();
+        };
+        const auto &kids = partition.Children();
+        const bool plain_shape =
+            kids.size() >= 3 && is_leaf(kids[0]) && first_token(kids[0]) == verilog_tokentype::TK_do &&
+            !is_leaf(kids[1]) && first_token(LeftmostDescendant(kids[1])) == verilog_tokentype::TK_begin &&
+            first_token(RightmostDescendant(kids[1])) == verilog_tokentype::TK_end &&
+            first_token(LeftmostDescendant(kids[2])) == verilog_tokentype::TK_while;
+        if (body != nullptr && plain_shape) {
           // between do... and while (...);
           auto &seq_block_partition = partition.Children()[1];
           auto &begin_partition = LeftmostDescendant(seq_block_partition);

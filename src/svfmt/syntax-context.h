@@ -71,6 +71,15 @@ inline bool DirectParentsAre(const verible::SyntaxTreeContext &context,
   return true;
 }
 
+// The innermost ancestor of kind `kind`, or nullptr.
+inline const verible::Symbol *NearestOfKind(const verible::SyntaxTreeContext &context,
+                                            SyntaxKind kind) {
+  for (auto it = context.rbegin(); it != context.rend(); ++it) {
+    if (KindOf(**it) == kind) return *it;
+  }
+  return nullptr;
+}
+
 // Walks outward from the innermost ancestor. Returns true if `include`
 // matches before `exclude` does.
 template <typename Include, typename Exclude>

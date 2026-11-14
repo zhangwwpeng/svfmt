@@ -109,6 +109,10 @@ class SlangAnalyzer {
   static absl::StatusOr<std::unique_ptr<SlangAnalyzer>> AnalyzeWithMode(
       std::string_view text, std::string_view filename, const AnalyzerOptions &options,
       const ParseMode *mode, bool all_branches);
+  // AnalyzeWithMode without the exception guard.
+  static absl::StatusOr<std::unique_ptr<SlangAnalyzer>> AnalyzeWithModeImpl(
+      std::string_view text, std::string_view filename, const AnalyzerOptions &options,
+      const ParseMode *mode, bool all_branches);
 
   std::string original_text_;
   // Keeps sub-parses of macro arguments alive (origins_ points into them).

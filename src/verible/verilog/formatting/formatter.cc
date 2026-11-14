@@ -59,6 +59,7 @@
 #include "verible/common/util/vector-tree.h"
 #include "svfmt/list-kinds.h"
 #include "lexeq/lex-equivalence.h"
+#include "verible/common/strings/utf8.h"
 #include "svfmt/slang-analyzer.h"
 #include "verible/verilog/formatting/align.h"
 #include "verible/verilog/formatting/comment-controls.h"
@@ -388,6 +389,13 @@ std::optional<std::string> FormatBranch(std::string_view branch, std::optional<s
   if (branch.find("/*") != std::string_view::npos && branch.find('\n') != std::string_view::npos) {
     return std::nullopt;
   }
+  // So would a "\" continued line (a `define body, a string) and a
+  // triple-quoted string, whose leading spaces may be content.
+  if (branch.find("\\\n") != std::string_view::npos ||
+      branch.find("\\\r\n") != std::string_view::npos ||
+      branch.find("\"\"\"") != std::string_view::npos) {
+    return std::nullopt;
+  }
   for (const BranchWrapper &w : kBranchWrappers) {
     std::string wrapped = absl::StrCat(w.prolog, branch, "\n", w.closing,
                                        w.closing.empty() ? "" : "\n", "endmodule\n");
@@ -425,18 +433,23 @@ std::optional<std::string> FormatBranch(std::string_view branch, std::optional<s
     const bool shift_right = target >= base;
     const size_t shift = shift_right ? target - base : base - target;
 
+    // svfmt: the branch keeps its line terminators (CRLF stays CRLF).
+    const std::string_view eol =
+        branch.find("\r\n") != std::string_view::npos ? "\r\n" : "\n";
     std::string result;
     for (size_t i = body_begin; i < body_end; ++i) {
-      if (i > body_begin) result += '\n';
+      std::string_view line = lines[i];
+      if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+      if (i > body_begin) result += eol;
       if (i == body_begin) {
-        result += std::string(TrimSpaces(lines[i]));
-      } else if (TrimSpaces(lines[i]).empty()) {
+        result += std::string(TrimSpaces(line));
+      } else if (TrimSpaces(line).empty()) {
         // Blank line: nothing to shift.
       } else if (shift_right) {
         result.append(shift, ' ');
-        result += std::string(lines[i]);
+        result += std::string(line);
       } else {
-        result += std::string(lines[i].substr(std::min(shift, LeadingSpaces(lines[i]))));
+        result += std::string(line.substr(std::min(shift, LeadingSpaces(line))));
       }
     }
     return result;
@@ -483,11 +496,19 @@ std::string PreformatDisabledBranchesOnce(std::string_view text, std::string_vie
   std::vector<std::optional<size_t>> indents;
   for (const auto &range : ranges) indents.push_back(GroupIndent(lines, range, ranges));
 
+  // svfmt: a branch in a "verilog_format: off" range stays as it is.
+  const auto format_off =
+      DisableFormattingRanges(formatted_analyzer->get()->Data().Contents(),
+                              formatted_analyzer->get()->Data().TokenStream());
   std::string out = *formatted;
   // Last first, so that earlier offsets stay valid.
   for (size_t i = ranges.size(); i-- > 0;) {
     const auto [begin, end] = ranges[i];
     if (begin >= end || end > out.size()) continue;
+    if (format_off.Contains(static_cast<int>(begin)) ||
+        format_off.Contains(static_cast<int>(end - 1))) {
+      continue;
+    }
     const std::string branch = out.substr(begin, end - begin);
     if (auto replacement = FormatBranch(branch, indents[i], style, filename)) {
       out.replace(begin, end - begin, *replacement);
@@ -1006,6 +1027,12 @@ class ContinuationCommentAligner {
                              const std::string_view base_text)
       : line_column_map_(line_column_map), base_text_(base_text) {}
 
+  void Reset() {
+    formatted_column_ = kInvalidColumn;
+    original_column_ = kInvalidColumn;
+    skip_next_ = true;
+  }
+
   // Takes the next line that has to be formatted and a vector of already
   // formatted lines.
   //
@@ -1021,6 +1048,10 @@ class ContinuationCommentAligner {
 
     if (already_formatted_lines->empty()) {
       VLOG(4) << "Not a continuation comment line: first line";
+      return false;
+    }
+    if (skip_next_) {
+      skip_next_ = false;
       return false;
     }
 
@@ -1131,6 +1162,17 @@ class ContinuationCommentAligner {
     }
   }
 
+  // svfmt: a token that spans lines ("/* l1\n  l2 */") leaves the column at
+  // the width of its last line.
+  static void AddTokenWidth(std::string_view text, int *column) {
+    const auto last_nl = text.find_last_of('\n');
+    if (last_nl == std::string_view::npos) {
+      *column += verible::utf8_len(text);
+    } else {
+      *column = verible::utf8_len(text.substr(last_nl + 1));
+    }
+  }
+
   static int CalculateEolCommentColumn(const verible::FormattedExcerpt &line) {
     // Compute the starting column of the trailing EOL comment the same way
     // FormattedExcerpt::FormattedText emits spaces, including:
@@ -1150,7 +1192,9 @@ class ContinuationCommentAligner {
     if (front.before.action == verible::SpacingDecision::kAlign) {
       column += front.before.spaces;
     }
-    column += front.token->text().length();
+    // svfmt: in characters, as the original column it is compared with
+    // (GetTokenColumn counts UTF-8 code points).
+    AddTokenWidth(front.token->text(), &column);
 
     const auto &tokens = line.Tokens();
     for (size_t i = 1; i < tokens.size(); ++i) {
@@ -1159,7 +1203,7 @@ class ContinuationCommentAligner {
       // Do not add the last token's length: that is the EOL comment whose
       // starting column we want.
       if (i + 1 < tokens.size()) {
-        column += ftoken.token->text().length();
+        AddTokenWidth(ftoken.token->text(), &column);
       }
     }
 
@@ -1177,6 +1221,7 @@ class ContinuationCommentAligner {
   int original_column_ = kInvalidColumn;
   // Starting column of current comment group in formatted source code.
   int formatted_column_ = kInvalidColumn;
+  bool skip_next_ = false;
 };
 
 Status Formatter::Format(const ExecutionControl &control) {
@@ -1236,6 +1281,129 @@ Status Formatter::Format(const ExecutionControl &control) {
       return absl::OkStatus();
     }
   }
+
+  // svfmt: a line-oriented directive ("`line `N `f(x) 1", "`include `F(x)")
+  // stays on its input line: its macro calls may have become partitions of
+  // their own.
+  tree_unwrapper.ApplyPreOrder([&](TokenPartitionTree &node) {
+    auto &children = node.Children();
+    for (size_t i = 0; i + 1 < children.size(); ++i) {
+      if (!is_leaf(children[i])) continue;
+      const auto tokens = children[i].Value().TokensRange();
+      if (tokens.empty()) continue;
+      const std::string_view first = tokens.front().Text();
+      if (first != "`line" && first != "`include" && first != "`timescale" &&
+          first != "`default_nettype") {
+        continue;
+      }
+      bool merged_macro = false;
+      int open_parens = 0;
+      for (const auto &t : tokens) {
+        if (t.TokenEnum() == '(') ++open_parens;
+        if (t.TokenEnum() == ')' && open_parens > 0) --open_parens;
+        if (t.TokenEnum() == verilog_tokentype::MacroIdentifier ||
+            t.TokenEnum() == verilog_tokentype::MacroCallId) {
+          merged_macro = true;
+        }
+      }
+      while (i + 1 < children.size()) {
+        auto &next = children[i + 1];
+        const auto next_tokens = next.Value().TokensRange();
+        // Only the directive's own pieces: its arguments come from macros
+        // ("`N", "`f(x)") with plain numbers or strings after them. A
+        // following item on the same line ("`timescale 1ns/1ps module m;",
+        // "`include "f.svh" import p::*;") is not part of it.
+        const auto is_macro_token = [](const verible::PreFormatToken &t) {
+          return t.TokenEnum() == verilog_tokentype::MacroIdentifier ||
+                 t.TokenEnum() == verilog_tokentype::MacroCallId ||
+                 t.TokenEnum() == verilog_tokentype::MacroIdItem;
+        };
+        const auto is_literal = [](const verible::PreFormatToken &t) {
+          return t.TokenEnum() == verilog_tokentype::TK_DecNumber ||
+                 t.TokenEnum() == verilog_tokentype::TK_StringLiteral;
+        };
+        const bool macro_piece = !next_tokens.empty() && is_macro_token(next_tokens.front());
+        const bool literal_piece =
+            merged_macro && is_leaf(next) && !next_tokens.empty() &&
+            std::all_of(next_tokens.begin(), next_tokens.end(), is_literal);
+        if (next_tokens.empty() || (!macro_piece && !literal_piece && open_parens == 0) ||
+            next_tokens.front().OriginalLeadingSpaces().find('\n') != std::string_view::npos) {
+          break;
+        }
+        merged_macro = true;
+        // Inside a macro call's arguments until its ')'.
+        for (const auto &t : next_tokens) {
+          if (t.TokenEnum() == '(') ++open_parens;
+          if (t.TokenEnum() == ')' && open_parens > 0) --open_parens;
+        }
+        next.Children().clear();
+        verible::MergeConsecutiveSiblings(&node, i);
+      }
+    }
+  });
+
+  // svfmt: comment lines before a macro without arguments ("// c" then
+  // "`ASSERT ($stable(a));", the macro expanding to "assert") are lines of
+  // their own (the macro partition ends up as comment leaves and the macro
+  // name): they go before the whole statement, which keeps its layout.
+  tree_unwrapper.ApplyPreOrder([&](TokenPartitionTree &node) {
+    auto &children = node.Children();
+    if (children.size() < 2 || is_leaf(children.front())) return;
+    const auto policy = node.Value().PartitionPolicy();
+    if (policy != PartitionPolicyEnum::kFitOnLineElseExpand &&
+        policy != PartitionPolicyEnum::kAppendFittingSubPartitions) {
+      return;
+    }
+    auto &macro = children.front().Children();
+    if (macro.size() < 2 || !is_leaf(macro.back())) return;
+    const auto name = macro.back().Value().TokensRange();
+    if (name.empty() || name.front().TokenEnum() != verilog_tokentype::MacroIdentifier) return;
+    const bool comments = std::all_of(macro.begin(), macro.end() - 1, [](const auto &c) {
+      const auto tokens = c.Value().TokensRange();
+      return is_leaf(c) && !tokens.empty() &&
+             std::all_of(tokens.begin(), tokens.end(), [](const verible::PreFormatToken &t) {
+               return IsComment(verilog_tokentype(t.TokenEnum()));
+             });
+    });
+    if (!comments) return;
+    const size_t count = macro.size() - 1;
+    UnwrappedLine rest = macro.back().Value();
+    rest.SpanUpToToken(node.Value().TokensRange().end());
+    rest.SetPartitionPolicy(policy);
+    TokenPartitionTree group(rest);
+    group.Children().push_back(TokenPartitionTree(macro.back().Value()));
+    for (size_t i = 1; i < children.size(); ++i) {
+      group.Children().push_back(std::move(children[i]));
+    }
+    std::vector<TokenPartitionTree> lines;
+    for (size_t i = 0; i < count; ++i) lines.push_back(std::move(macro[i]));
+    children.clear();
+    for (auto &line : lines) children.push_back(std::move(line));
+    children.push_back(std::move(group));
+    node.Value().SetPartitionPolicy(PartitionPolicyEnum::kAlwaysExpand);
+  });
+
+  // svfmt: a macro name and a "(" written right after it ("`ASSERT((a)"),
+  // possibly split into partitions when the macro is unknown, stay together:
+  // a line break there would no longer read as a call.
+  tree_unwrapper.ApplyPreOrder([&](TokenPartitionTree &node) {
+    auto &children = node.Children();
+    for (size_t i = 0; i + 1 < children.size(); ++i) {
+      if (!is_leaf(children[i])) continue;
+      const auto tokens = children[i].Value().TokensRange();
+      if (tokens.empty() || tokens.back().TokenEnum() != verilog_tokentype::MacroIdentifier) {
+        continue;
+      }
+      const auto next = verible::LeftmostDescendant(children[i + 1]).Value().TokensRange();
+      // svfmt: also "`ASSERT ($stable(a));" on one line (the macro expands
+      // to "assert"): the statement continues on the macro's line.
+      if (next.empty() || next.front().TokenEnum() != '(' ||
+          next.front().OriginalLeadingSpaces().find('\n') != std::string_view::npos) {
+        continue;
+      }
+      verible::MergeLeafIntoNextLeaf(&children[i]);
+    }
+  });
 
   // svfmt: "x.randomize(a) with {": a short argument list stays on the line
   // of the call and "with {" (the constraint block below always expands, which
@@ -1340,6 +1508,27 @@ Status Formatter::Format(const ExecutionControl &control) {
   for (const auto &uwline : unwrapped_lines) {
     // TODO(fangism): Use different formatting strategies depending on
     // uwline.PartitionPolicy().
+    // svfmt: a line kept as it is (outside --lines) is not formatted like
+    // the continuation aligner computes; comments after it start anew.
+    const auto in_disabled_range = [&](const verible::FormattedExcerpt &line) {
+      return !line.Tokens().empty() &&
+             disabled_ranges_.Contains(line.Tokens().front().token->left(full_text));
+    };
+    if (!formatted_lines_.empty() && in_disabled_range(formatted_lines_.back())) {
+      continuation_comment_aligner.Reset();
+    }
+    // svfmt: the first token of the previous line gets its indentation now
+    // (see below), so that the aligner computes its comment column as it is
+    // printed (a line kept as it is by try_wrap_long_lines).
+    if (!formatted_lines_.empty()) {
+      auto &tokens = formatted_lines_.back().MutableTokens();
+      if (!tokens.empty() &&
+          tokens.front().before.action == verible::SpacingDecision::kPreserve &&
+          !disabled_ranges_.Contains(tokens.front().token->left(full_text))) {
+        tokens.front().before.action = verible::SpacingDecision::kAppend;
+        tokens.front().before.spaces = 0;
+      }
+    }
     if (continuation_comment_aligner.HandleLine(uwline, &formatted_lines_)) {
     } else if (uwline.PartitionPolicy() ==
                PartitionPolicyEnum::kAlreadyFormatted) {
@@ -1371,7 +1560,14 @@ Status Formatter::Format(const ExecutionControl &control) {
       // long comment) keeps its original spacing, as without the flag: the
       // wrapped layout of such a line is not stable between passes.
       bool over_limit = false;
-      if (style_.try_wrap_long_lines && formatted_lines_.back().CompletedFormatting()) {
+      // A token that spans lines (a block comment shifted with the code)
+      // changes its width between passes: such a line is not kept for it.
+      const auto range = uwline.TokensRange();
+      const bool multiline_token = std::any_of(range.begin(), range.end(), [](const auto &t) {
+        return t.Text().find('\n') != std::string_view::npos;
+      });
+      if (style_.try_wrap_long_lines && !multiline_token &&
+          formatted_lines_.back().CompletedFormatting()) {
         const std::string rendered = formatted_lines_.back().Render();
         for (std::string_view line : absl::StrSplit(rendered, '\n')) {
           if (static_cast<int>(line.size()) > style_.column_limit) over_limit = true;
@@ -1420,13 +1616,31 @@ Status Formatter::Format(const ExecutionControl &control) {
       front.before.spaces = 0;
     }
   }
+  // svfmt: alignment never pads between a macro name and its arguments
+  // ("`M(a)" in an aligned parameter list): the padding would read as the
+  // input's spacing on the next pass and grow.
+  for (auto &line : formatted_lines_) {
+    auto &tokens = line.MutableTokens();
+    for (size_t i = 1; i < tokens.size(); ++i) {
+      if (tokens[i - 1].token->token_enum() != verilog_tokentype::MacroCallId ||
+          tokens[i].token->token_enum() != '(') {
+        continue;
+      }
+      auto &before = tokens[i].before;
+      if (before.action == verible::SpacingDecision::kAlign) {
+        before.action = verible::SpacingDecision::kAppend;
+        before.spaces = tokens[i].OriginalLeadingSpaces().empty() ? 0 : 1;
+      }
+    }
+  }
   // svfmt: an escaped identifier ends at whitespace; "\\a ," must not
   // become "\\a,". Alignment can drop that space.
   for (auto &line : formatted_lines_) {
     auto &tokens = line.MutableTokens();
     for (size_t i = 1; i < tokens.size(); ++i) {
       const auto text = tokens[i - 1].token->text();
-      if (text.empty() || text.front() != '\\') continue;
+      // Also an escaped macro name ("`\\FOO ,").
+      if (!text.starts_with('\\') && !text.starts_with("`\\")) continue;
       auto &before = tokens[i].before;
       if ((before.action == verible::SpacingDecision::kAppend ||
            before.action == verible::SpacingDecision::kAlign) &&

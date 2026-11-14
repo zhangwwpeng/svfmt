@@ -234,7 +234,9 @@ static bool formatOneFile(std::string_view filename,
 
   const std::string &formatted_output(stream.str());
   if (!format_status.ok()) {
-    if (!inplace) {
+    // svfmt: also with stdin (where --inplace writes to stdout), but not for
+    // --verify, which prints nothing.
+    if ((!inplace || is_stdin) && !check_changes_only) {
       // Fall back to printing original content regardless of error condition.
       std::cout << *content_or;
     }
@@ -254,7 +256,8 @@ static bool formatOneFile(std::string_view filename,
         break;
     }
 
-    return absl::GetFlag(FLAGS_failsafe_success);
+    // svfmt: --verify reports a file that could not be formatted as failing.
+    return absl::GetFlag(FLAGS_failsafe_success) && !check_changes_only;
   }
 
   // Check if the output is the same as the input.
@@ -321,6 +324,10 @@ int main(int argc, char **argv) {
     return 1;
   }
 
+  // Tabs become spaces before formatting; with --lines, the lines outside the
+  // range keep their text, tabs included.
+  if (!lines_to_format.empty()) svfmt::GlobalAnalyzerOptions().tab_width = 0;
+
   // Some sanity checks if multiple files are given.
   if (file_args.size() > 2) {
     if (!lines_to_format.empty()) {
@@ -328,7 +335,8 @@ int main(int argc, char **argv) {
       return 1;
     }
 
-    if (!absl::GetFlag(FLAGS_inplace)) {
+    // svfmt: --verify writes nothing, so it can check several files.
+    if (!absl::GetFlag(FLAGS_inplace) && !absl::GetFlag(FLAGS_verify)) {
       // Dumping all to stdout doesn't really make sense.
       std::cerr << "--inplace required for multiple files." << std::endl;
       return 1;
@@ -345,7 +353,8 @@ int main(int argc, char **argv) {
 
   int ret_val = 0;
   if (absl::GetFlag(FLAGS_verify)) {
-    ret_val = any_changes;
+    // svfmt: a file that could not be read or formatted fails the check too.
+    ret_val = any_changes || !all_success;
   } else {
     ret_val = all_success ? 0 : 1;
   }

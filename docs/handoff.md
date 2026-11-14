@@ -1,16 +1,27 @@
-# Handoff notes (2026-11-10)
+# Handoff notes (2026-11-14)
 
-State at commit time; read this first when resuming.
+State at pause time (latest commit `b479f2e` + uncommitted working-tree fixes from 2026-11-12..14); read this first when resuming.
 
 ## Goals and results
 - Safety first: formatting never changes the token stream. A file that
   cannot be formatted safely is echoed unchanged (exit 1 with
   --failsafe_success=false). Since 2026-11-08 there is no Verible
   comparison; the style is our own, starting from Verible's.
-- Corpus ../sv_test (26.5k files, 01-09): 0 semantic_change /
-  not_idempotent / crash / timeout, with default flags and with the nvim
-  alignment flags (build-dev/full-nvim/run_all.sh). Remaining rejections in
-  01-08 were checked by hand: illegal on purpose
+- Corpus ../sv_test (26.5k files, 01-09), last full run on 2026-11-13
+  (prior to the two final `try_wrap_long_lines` edits in `formatter.cc`);
+  `full` and `full-nvim` re-run on 2026-11-14 after the alignment fix in
+  item 7: 0 semantic_change, 0 crash, 0 timeout, 0 not_idempotent in both.
+  - `full-nvim` (`build-dev/full-nvim/run_all.sh`): 0 not_idempotent,
+    0 timeout.
+  - `full` (`build-dev/full/run_all.sh`): 0 not_idempotent, 0 timeout
+    (the 3 `bp_cce*.sv` in `08-weird-syntax` are fixed, item 7).
+  - `full-trywrap` (`build-dev/full-trywrap/run_all.sh`): not re-run after
+    the item 7 fix; the previous run had 1 timeout and 22 not_idempotent
+    (the 3 `bp_cce*.sv` in 08, 4 in 02, 2 in 03, 13 in 05). The 3 in 08
+    and the 4 in 02 (`cv32e40p_decoder.sv`, `te_priority.sv`, two
+    `prim_sha2.sv`) are fixed and verified individually; the remaining 15
+    in 03/05 are diagnosed in item 1 below.
+- Remaining rejections in 01-08 were checked by hand: illegal on purpose
   (tests/corpus_expected_rejects.txt), tool dialects, slang strictness, or
   multi-file. 09 (LRM excerpts) is mostly prose; fragment mode was dropped
   (2026-11-10).
@@ -23,8 +34,14 @@ State at commit time; read this first when resuming.
 - Verible source (reference for porting): ~/workspace/ref/verible (085eef05);
   oracle binary ~/workspace/ref/verible-bin/.../verible-verilog-format
   (only to compare behavior by hand now).
-- The editor uses ~/.local/bin/svfmt (copied from build-dev after a clean
-  corpus run) through conform.nvim with --failsafe_success=false.
+- The editor uses ~/.local/bin/svfmt (currently still from `b479f2e`,
+  2026-11-12; update from `build-dev/svfmt` after a clean corpus run and
+  commit) through conform.nvim with --failsafe_success=false.
+- Working tree status: `src/`, `docs/handoff.md`, and new regression tests
+  (`tests/inputs/{directive_same_line,review_*}.sv`) have uncommitted edits.
+  `build-dev/svfmt` is built from the current tree and passes `ctest
+  --test-dir build-dev` (`format_inputs`). Review artifacts (`agy*.md`,
+  `pi.md`, `vibe.md`, `reports/`) are untracked.
 
 ## Commands
 ```sh
@@ -62,13 +79,26 @@ build-dev while a corpus run uses it.
 ## Open items
 1. --try_wrap_long_lines is off by default (a style decision for the user).
    It wraps long single-partition lines (e.g. a long assign) that are
-   otherwise kept as they are. Fixed on 2026-11-10/12: a trailing `define
-   comment (EOL or block) stays on its line, no line break is introduced
-   before ',' or an inline block comment, and a line that overflows only
-   because of its trailing comment, or that the search cannot make fit,
-   keeps its original spacing. Full corpus with the flag (2026-11-12):
-   0 semantic_change, but 20 not_idempotent (02: 4, 03: 2, 05: 14) and 1
-   timeout remain (safe: rejected); build-dev/full-trywrap/run_all.sh.
+   otherwise kept as they are. Fixed on 2026-11-10..14: a trailing `define
+   comment (EOL or block) stays on its line; no line break is introduced
+   before ',' or an inline block comment; a line that overflows only
+   because of its trailing comment, or that the search cannot make fit
+   (unless it contains a multi-line token whose line widths shift), keeps
+   its original spacing; and `formatted_lines_.back()` clears `kPreserve`
+   before `ContinuationCommentAligner::HandleLine` (fixing `02-sv-designs`:
+   `cv32e40p_decoder.sv`, `te_priority.sv`, and both `prim_sha2.sv`).
+   Remaining 15 `not_idempotent` files (all safe: rejected; 03: 2, 05: 13)
+   share one root cause: pass 1 wraps inside a single `UnwrappedLine` with
+   `wrap_spaces`, and the introduced `\n` makes `TreeUnwrapper` split them
+   into separate `UnwrappedLine`s at base indent on pass 2:
+   - `/*...*/` followed on the same line by code (`nvdla/.../fp_format_cvt.v`)
+     or `;` (`vtr/.../mkDelayWorker32B.v`);
+   - `(* ... *)` followed on the same line by `wire ...` (12
+     `vtr/.../vexriscv/*.v` files);
+   - `;` followed on the same line by a `//...` EOL comment inside a
+     `policy: wrap` partition (`nvdla/.../memory.v`, `$display(...)`, where
+     `OverflowsOnlyByTrailingComment` only checks `kFitOnLineElseExpand`
+     and `LayoutOptimizer` wraps inside the leaf).
    Cost: ~40% more formatting time.
 2. Safety checks (2026-11-12): besides the re-parse token comparison,
    svfmt compares its final output with the original input using the raw
@@ -85,4 +115,57 @@ build-dev while a corpus run uses it.
    statements on the line of if/always/repeat when they fit, "module tb ();",
    enum members one per line, leading-comma lists indent the first element
    one more level, "type#(T)" in typedefs vs "type #(T)" in declarations,
-   dist lists with more than one item expand.
+   dist lists with more than one item expand, "L : stmt" statement labels.
+5. Review round agy_v2 / vibe v2 (2026-11-12, tests/inputs/review_agy_v2.sv):
+   fixed goto repetition "b[->1:2]", "inside {", "with [", "s_eventually
+   [1:3]", nested case / if-else in a case item (no longer flattened by
+   alignment; indented below the label), rows with a forced line break
+   ("f(1,  // c" then "2);") never take part in any alignment group,
+   checker "rand" declarations after a comment, "L: if ... end else",
+   "[$clog2(" return types with a comment-only port list, continuation
+   comments after a multi-line block comment or a line outside --lines,
+   comment lines before a macro statement, "`uvm_field_int (" keeps its space
+   (the safety check reads "`M (" as a call only without the space).
+   Left as they are (safe): `ifdef inside if/while/do-while conditions and
+   inside macro arguments is laid out poorly; UDP "(0 1)" edges and a
+   macro-closed attribute "`END_ATTR" are rejected.
+6. Review rounds code-review / pi / agy_v3 (2026-11-13, tests/inputs/
+   review_pi.sv, review_agy_v3*.sv, directive_same_line.sv). Safety check
+   (src/lexeq) holes closed: line breaks inside macro arguments are
+   compared; "\\F (x)" escaped macro names follow slang (one space before
+   "(" still opens formals; "`\\F" and "`F" are one macro); a macro defined
+   function-like in any branch is function-like; "table" is a UDP table only
+   inside a primitive; "`line" / "`include" may move to the start of a line,
+   not away; a `define line ending in "// c \" compares the next line as
+   body (other tools continue there; slang does not). Also: `pragma keeps
+   its tabs, inactive branches in "verilog_format: off" stay as they are and
+   keep CRLF, "#1.5 'hff" keeps its space, directive lines take only their
+   own macro arguments, alignment never pads between a macro name and "(",
+   'begin' from a macro is not merged, ports with "$clog2(" stay whole,
+   comment lines between uvm _begin/_end are indented.
+   Known leftovers (all safe: rejected, input echoed): --define macros and
+   macros defined both ways across branches can be rejected; "`ifdef (X)"
+   inside macro arguments; some `define continuations followed by block
+   comments. Hand-written scanners in slang-analyzer.cc (TabsToSpaces,
+   ScanConditionalDirectives, StubDefinitions) and the heuristic lexeq
+   check remain the main risk; the proposed next step is a differential
+   check against slang's own preprocessor (expanded token streams under
+   several define sets) plus mutation testing of corpus files.
+7. Default-flag regression fixed (2026-11-14): 3 files in `08-weird-syntax`
+   (`black-parrot` `bp_cce.sv`, `bp_cce_msg.sv`, `bp_cce_wrapper.sv`) were
+   `not_idempotent` under `infer` alignment. Cause:
+   `IgnoreWithinPortDeclarationPartitionGroup` (`src/verible/verilog/
+   formatting/align.cc`) did not ignore `SyntaxKind::MacroUsage` (e.g.
+   `` `declare_bp_proc_params(bp_params_p) `` inside `#(...)`), so
+   `ParameterDeclarationColumnSchemaScanner` reserved the macro's `kParenGroup`
+   as column `{1}`, padded the other rows, and `formatter.cc` stripped the
+   alignment padding before `(`. On pass 2 `OriginalIsAligned()` saw
+   mismatched spacing before `(` and `infer` flipped to `kFlushLeft`.
+   Fixed: `MacroUsage` rows are ignored in
+   `IgnoreWithinPortDeclarationPartitionGroup` and
+   `IgnoreWithinStructUnionMemberPartitionGroup`, and
+   `ParameterDeclarationColumnSchemaScanner::Visit` returns early for anything
+   but `ParameterDeclaration` / `TypeParameterDeclaration` /
+   `ParameterDeclarationStatement`. Regression input:
+   `tests/inputs/param_macro_alignment.sv` (fails `--verify_convergence` on
+   the old binary, passes now).

@@ -1,5 +1,7 @@
 #include "svfmt/slang-analyzer.h"
 
+#include "verible/common/strings/comment-utils.h"
+
 #include <algorithm>
 #include <cctype>
 #include <cstring>
@@ -9,6 +11,7 @@
 #include <set>
 #include <optional>
 #include <string>
+#include <unordered_set>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -156,6 +159,10 @@ struct CondDirective {
   SyntaxKind kind;
 };
 
+size_t StringEnd(std::string_view text, size_t i);
+size_t DefineEnd(std::string_view text, size_t i, bool comment_continues = false);
+size_t EscapedIdentifierEnd(std::string_view text, size_t i);
+
 // Finds conditional directives outside comments, strings and `define bodies.
 std::vector<CondDirective> ScanConditionalDirectives(std::string_view text) {
   std::vector<CondDirective> out;
@@ -176,17 +183,16 @@ std::vector<CondDirective> ScanConditionalDirectives(std::string_view text) {
       size_t e = text.find("*/", i + 2);
       i = e == std::string_view::npos ? n : e + 2;
     } else if (c == '"') {
-      ++i;
-      while (i < n && text[i] != '"' && text[i] != '\n') i += text[i] == '\\' ? 2 : 1;
-      ++i;
+      // Also triple-quoted strings and "\" CRLF continuations.
+      i = StringEnd(text, i);
+    } else if (c == '\\' && i + 1 < n && !std::isspace(static_cast<unsigned char>(text[i + 1]))) {
+      i = EscapedIdentifierEnd(text, i);
     } else if (c == '`') {
       const size_t kw_end = ident_end(i + 1);
       const std::string_view kw = text.substr(i + 1, kw_end - i - 1);
       if (kw == "define") {
-        // Skip the macro body, including line continuations.
-        size_t p = kw_end;
-        while (p < n && !(text[p] == '\n' && text[p - 1] != '\\')) ++p;
-        i = p;
+        // Skip the macro body, including line continuations (LF or CRLF).
+        i = DefineEnd(text, kw_end);
         continue;
       }
       struct { std::string_view name; int e; SyntaxKind k; bool has_name; } static const kKinds[] = {
@@ -203,20 +209,40 @@ std::vector<CondDirective> ScanConditionalDirectives(std::string_view text) {
         if (k.has_name) {
           size_t p = kw_end;
           while (p < n && (text[p] == ' ' || text[p] == '\t')) ++p;
+          // A comment before the name is not re-inserted with the directive:
+          // leave all directives to slang's preprocessor.
+          if (text.substr(p, 2) == "/*" || text.substr(p, 2) == "//") return {};
           if (p < n && text[p] == '(') {
+            // An expression (SV-2023): comments inside it are skipped.
             int depth = 0;
             size_t q = p;
-            for (; q < n && text[q] != '\n'; ++q) {
+            bool closed = false;
+            while (q < n && text[q] != '\n') {
+              if (text.substr(q, 2) == "/*") {
+                const size_t e = text.find("*/", q + 2);
+                if (e == std::string_view::npos) return {};
+                q = e + 2;
+                continue;
+              }
+              if (text.substr(q, 2) == "//") break;
               if (text[q] == '(') ++depth;
-              if (text[q] == ')' && --depth == 0) { ++q; break; }
+              if (text[q] == ')' && --depth == 0) {
+                ++q;
+                closed = true;
+                break;
+              }
+              ++q;
             }
+            if (!closed) return {};
             d.name_begin = p;
             d.name_end = d.end = q;
           } else {
             d.name_begin = p;
             d.name_end = d.end = ident_end(p);
           }
-          if (d.name_end == d.name_begin) break;  // malformed; leave to slang
+          // Malformed: blanking only some directives of a group would pair
+          // them wrongly; leave all of them to slang's preprocessor.
+          if (d.name_end == d.name_begin) return {};
         }
         out.push_back(d);
         matched = true;
@@ -284,7 +310,10 @@ class SlangAnalyzer::Builder {
   // empty view.
   std::string_view TriviaAtCursor(std::string_view text) const {
     const size_t offset = static_cast<size_t>(Offset(cursor_));
-    if (text.empty() || match_text_.size() - offset < text.size()) return {};
+    if (text.empty() || offset > match_text_.size() ||
+        match_text_.size() - offset < text.size()) {
+      return {};
+    }
     // Trivia that points into a source buffer can be placed exactly: text of
     // the main buffer must start at the cursor, text of another file (e.g.
     // the trailing trivia of an included file) is never ours.
@@ -981,6 +1010,22 @@ class SlangAnalyzer::Builder {
         EmitDotStar(n.dot, n.star, out);
         return true;
       }
+      // "module m(.*);": ".*" is one token, as in a port connection.
+      case SyntaxKind::WildcardPortList: {
+        const auto &n = node.as<WildcardPortListSyntax>();
+        Tok(n.openParen, out);
+        EmitDotStar(n.dot, n.star, out);
+        Tok(n.closeParen, out);
+        return true;
+      }
+      case SyntaxKind::WildcardUdpPortList: {
+        const auto &n = node.as<WildcardUdpPortListSyntax>();
+        Tok(n.openParen, out);
+        EmitDotStar(n.dot, n.star, out);
+        Tok(n.closeParen, out);
+        Tok(n.semi, out);
+        return true;
+      }
       case SyntaxKind::FunctionDeclaration:
       case SyntaxKind::TaskDeclaration: {
         const auto &n = node.as<FunctionDeclarationSyntax>();
@@ -1462,7 +1507,8 @@ void ReshapeAsModuleItems(SymbolPtr &tree) {
       bool other = false;
       for (auto &part : statement.mutable_children()) {
         if (!part) continue;
-        if (part->Tag().tag == static_cast<int>(SyntaxKind::InvocationExpression) && !call) {
+        if (part->Kind() == verible::SymbolKind::kNode &&
+            part->Tag().tag == static_cast<int>(SyntaxKind::InvocationExpression) && !call) {
           call = &part;
         } else if (part->Kind() == verible::SymbolKind::kLeaf && call && !semi) {
           semi = &part;
@@ -2014,11 +2060,139 @@ std::vector<std::pair<std::string, std::string>> IncludePlaceholders(
 
 }  // namespace
 
-// Replaces each tab with spaces up to the next multiple of `width`, except
-// inside comments, string literals and "verilog_format: off" regions (kept
-// verbatim). Only whitespace changes.
+// The "verilog_format: off/on" control in a comment, as the formatter reads
+// it (comment-controls.cc, with the same comment stripping): +1 for off, -1
+// for on, 0 for neither.
+int FormatControl(std::string_view comment) {
+  std::string_view text = verible::StripCommentAndSpacePadding(comment);
+  constexpr std::string_view kTrigger = "verilog_format:";
+  if (!text.starts_with(kTrigger)) return 0;
+  text.remove_prefix(kTrigger.size());
+  while (!text.empty() && (text.front() == ' ' || text.front() == '\t')) text.remove_prefix(1);
+  size_t word = 0;
+  while (word < text.size() && text[word] != ' ' && text[word] != '\t') ++word;
+  if (text.substr(0, word) == "off") return 1;
+  if (text.substr(0, word) == "on") return -1;
+  return 0;
+}
+
+// End of the escaped identifier starting at `i` (a '\\'): it runs to the next
+// whitespace and may contain '"', '(' or ')'.
+size_t EscapedIdentifierEnd(std::string_view text, size_t i) {
+  size_t j = i + 1;
+  while (j < text.size() && !std::isspace(static_cast<unsigned char>(text[j]))) ++j;
+  return j;
+}
+
+// End of the string literal starting at `i` (a '"'): a triple-quoted string
+// (SV-2023) ends at the next '"""'; an ordinary one at the closing '"' or an
+// unescaped line end ("\" line continuations, LF or CRLF, are inside it).
+size_t StringEnd(std::string_view text, size_t i) {
+  const size_t n = text.size();
+  if (text.substr(i, 3) == "\"\"\"") {
+    for (size_t j = i + 3; j < n; ++j) {
+      if (text[j] == '\\') {
+        ++j;
+      } else if (text.substr(j, 3) == "\"\"\"") {
+        return j + 3;
+      }
+    }
+    return n;
+  }
+  for (size_t j = i + 1; j < n; ++j) {
+    if (text[j] == '\\') {
+      ++j;
+      if (j < n && text[j] == '\r' && j + 1 < n && text[j + 1] == '\n') ++j;
+    } else if (text[j] == '"') {
+      return j + 1;
+    } else if (text[j] == '\n') {
+      return j;
+    }
+  }
+  return n;
+}
+
+// End of the comment starting at `i` ("//" or "/*").
+size_t CommentEnd(std::string_view text, size_t i) {
+  if (text.substr(i, 2) == "//") {
+    const size_t e = text.find('\n', i);
+    return e == std::string_view::npos ? text.size() : e;
+  }
+  const size_t e = text.find("*/", i + 2);
+  return e == std::string_view::npos ? text.size() : e + 2;
+}
+
+// End of the `define directive starting at `i`: its line, with "\" line
+// continuations (LF or CRLF) and comments (a block comment may span lines).
+// With `comment_continues`, "// c \" at the end of a line continues the
+// define, as some tools read it (slang ends it there).
+size_t DefineEnd(std::string_view text, size_t i, bool comment_continues) {
+  const size_t n = text.size();
+  while (i < n) {
+    if (text.substr(i, 2) == "//" || text.substr(i, 2) == "/*") {
+      const bool line_comment = text[i + 1] == '/';
+      i = CommentEnd(text, i);
+      if (comment_continues && line_comment && i > 0 && i < n) {
+        size_t e = i;
+        if (e > 0 && text[e - 1] == '\r') --e;
+        if (e > 0 && text[e - 1] == '\\') i += text[i] == '\n' ? 1 : 0;
+      }
+    } else if (text[i] == '"') {
+      i = StringEnd(text, i);
+    } else if (text[i] == '\\' && i + 1 < n && (text[i + 1] == '\n' || text[i + 1] == '\r')) {
+      i += text[i + 1] == '\r' && i + 2 < n && text[i + 2] == '\n' ? 3 : 2;
+    } else if (text[i] == '\n') {
+      return i;
+    } else {
+      ++i;
+    }
+  }
+  return n;
+}
+
+// End of the argument list of a macro call whose '(' is at `i`.
+size_t MacroArgsEnd(std::string_view text, size_t i) {
+  const size_t n = text.size();
+  int depth = 0;
+  while (i < n) {
+    const char c = text[i];
+    if (text.substr(i, 2) == "//" || text.substr(i, 2) == "/*") {
+      i = CommentEnd(text, i);
+      continue;
+    }
+    if (c == '"') {
+      i = StringEnd(text, i);
+      continue;
+    }
+    if (c == '\\' && i + 1 < n && !std::isspace(static_cast<unsigned char>(text[i + 1]))) {
+      i = EscapedIdentifierEnd(text, i);
+      continue;
+    }
+    if (c == '(' || c == '[' || c == '{') ++depth;
+    if ((c == ')' || c == ']' || c == '}') && --depth == 0) return i + 1;
+    ++i;
+  }
+  return n;
+}
+
+bool IsDirectiveKeyword(std::string_view word) {
+  static const std::unordered_set<std::string_view> kWords = {
+      "define",       "undef",           "undefineall",   "ifdef",         "ifndef",
+      "elsif",        "else",            "endif",         "include",       "timescale",
+      "line",         "pragma",          "resetall",      "celldefine",    "endcelldefine",
+      "default_nettype", "unconnected_drive", "nounconnected_drive", "begin_keywords",
+      "end_keywords", "__FILE__",        "__LINE__"};
+  return kWords.count(word) != 0;
+}
+
+// Replaces each tab with spaces up to the next multiple of `width` (a
+// `width` of 0 or less keeps the text as it is). Tabs are kept where they may
+// be content or where the formatter keeps the text: in comments, string
+// literals, `define directives (a stringified body), macro call arguments
+// (an argument may be stringified) and "verilog_format: off" regions. Only
+// whitespace changes.
 std::string TabsToSpaces(std::string_view text, int width) {
-  width = std::max(width, 1);
+  if (width <= 0) return std::string(text);
   std::string out;
   out.reserve(text.size());
   size_t column = 0;  // column of the next character in `out`
@@ -2032,27 +2206,47 @@ std::string TabsToSpaces(std::string_view text, int width) {
   bool off = false;
   while (i < n) {
     const char c = text[i];
-    if (c == '/' && i + 1 < n && text[i + 1] == '/') {
-      const size_t begin = i;
-      while (i < n && text[i] != '\n') ++i;
-      const std::string_view comment = text.substr(begin, i - begin);
-      if (comment.find("verilog_format: off") != std::string_view::npos) off = true;
-      if (comment.find("verilog_format: on") != std::string_view::npos) off = false;
-      append(comment);
-    } else if (c == '/' && i + 1 < n && text[i + 1] == '*') {
-      const size_t e = text.find("*/", i + 2);
-      const size_t end = e == std::string_view::npos ? n : e + 2;
+    if (c == '/' && i + 1 < n && (text[i + 1] == '/' || text[i + 1] == '*')) {
+      const size_t end = CommentEnd(text, i);
       const std::string_view comment = text.substr(i, end - i);
-      if (comment.find("verilog_format: off") != std::string_view::npos) off = true;
-      if (comment.find("verilog_format: on") != std::string_view::npos) off = false;
+      const int control = FormatControl(comment);
+      if (control > 0) off = true;
+      if (control < 0) off = false;
       append(comment);
       i = end;
     } else if (c == '"') {
-      const size_t begin = i;
-      ++i;
-      while (i < n && text[i] != '"' && text[i] != '\n') i += text[i] == '\\' ? 2 : 1;
-      i = std::min(i + 1, n);
-      append(text.substr(begin, i - begin));
+      const size_t end = StringEnd(text, i);
+      append(text.substr(i, end - i));
+      i = end;
+    } else if (c == '\\' && i + 1 < n && !std::isspace(static_cast<unsigned char>(text[i + 1]))) {
+      const size_t end = EscapedIdentifierEnd(text, i);
+      append(text.substr(i, end - i));
+      i = end;
+    } else if (c == '`') {
+      size_t j = i + 1;
+      // An escaped macro name ("`\\STR (x)") ends at whitespace.
+      if (j < n && text[j] == '\\') {
+        j = EscapedIdentifierEnd(text, j);
+      } else {
+        while (j < n && IsIdentChar(text[j])) ++j;
+      }
+      const std::string_view word = text.substr(i + 1, j - i - 1);
+      size_t end = j;
+      // "`pragma" contents are free-form and printed verbatim, like a
+      // "`define": both keep their tabs to the end of the directive.
+      if (word == "define" || word == "pragma") {
+        end = DefineEnd(text, j, /*comment_continues=*/true);
+      } else if (!word.empty() && !IsDirectiveKeyword(word)) {
+        // The arguments may start on a later line ("`M" then "(a,\tb)").
+        size_t k = j;
+        while (k < n && (text[k] == ' ' || text[k] == '\t' || text[k] == '\n' ||
+                         text[k] == '\r')) {
+          ++k;
+        }
+        if (k < n && text[k] == '(') end = MacroArgsEnd(text, k);
+      }
+      append(text.substr(i, end - i));
+      i = end;
     } else if (c == '\t' && !off) {
       append(std::string(width - column % width, ' '));
       ++i;
@@ -2119,7 +2313,19 @@ absl::StatusOr<std::unique_ptr<SlangAnalyzer>> SlangAnalyzer::Analyze(
   return result;
 }
 
+// slang reports some problems by throwing (e.g. a file that includes itself
+// registers its path twice); such input is rejected like any other.
 absl::StatusOr<std::unique_ptr<SlangAnalyzer>> SlangAnalyzer::AnalyzeWithMode(
+    std::string_view text, std::string_view filename, const AnalyzerOptions &options,
+    const ParseMode *mode, bool all_branches) {
+  try {
+    return AnalyzeWithModeImpl(text, filename, options, mode, all_branches);
+  } catch (const std::exception &e) {
+    return absl::InvalidArgumentError(absl::StrCat("slang: ", e.what()));
+  }
+}
+
+absl::StatusOr<std::unique_ptr<SlangAnalyzer>> SlangAnalyzer::AnalyzeWithModeImpl(
     std::string_view text, std::string_view filename, const AnalyzerOptions &options,
     const ParseMode *mode, bool all_branches) {
   std::unique_ptr<SlangAnalyzer> analyzer(new SlangAnalyzer);

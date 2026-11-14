@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <iterator>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -143,7 +144,8 @@ static bool InRangeLikeContext(const SyntaxTreeContext &context) {
       context,
       [](SyntaxKind k) {
         return k == SyntaxKind::ElementSelect || k == SyntaxKind::VariableDimension ||
-               k == SyntaxKind::DelayedSequenceElement;
+               k == SyntaxKind::DelayedSequenceElement || k == SyntaxKind::SequenceRepetition ||
+               k == SyntaxKind::SimpleRangeSelect;
       },
       [](SyntaxKind k) { return k == SyntaxKind::ConditionalExpression; });
 }
@@ -179,12 +181,69 @@ static bool IsAnySemicolon(const PreFormatToken &ftoken) {
 // Returns minimum number of spaces required between left and right token.
 // Returning kUnhandledSpacesRequired means the case was not explicitly
 // handled, and it is up to the caller to decide what to do when this happens.
+// svfmt: true if `left` immediately followed by `right` would be read as a
+// longer operator ("+" "+" is "++", "^" "~" is "^~", "&&" "&" is "&&&").
+static bool WouldLexAsLongerOperator(std::string_view left, std::string_view right) {
+  static constexpr std::string_view kOperators[] = {
+      "++",  "--",  "**",  "&&",  "||",  "&&&", "==",  "!=",   "===",  "!==",  "==?",
+      "!=?", "<=",  ">=",  "<<",  ">>",  "<<<", ">>>", "<<=",  ">>=",  "<<<=", ">>>=",
+      "->",  "->>", "<->", "|->", "|=>", "=>",  "*>",  "^~",   "~^",   "~&",   "~|",
+      "+=",  "-=",  "*=",  "/=",  "%=",  "&=",  "|=",  "^=",   "::",   "+:",   "-:",
+      "##",  "@@",  "/*",  "*/",  "//",  ":=",  ":/",  "'{",   "+/-",  "+%-",  "#-#",  "#=#"};
+  if (left.empty() || right.empty()) return false;
+  for (std::string_view op : kOperators) {
+    if (op.size() > left.size() && op.substr(0, left.size()) == left &&
+        right.substr(0, std::min(right.size(), op.size() - left.size())) ==
+            op.substr(left.size())) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static WithReason<int> SpacesRequiredBetween(
     const PreFormatToken &left, const PreFormatToken &right,
     const SyntaxTreeContext &left_context,
     const SyntaxTreeContext &right_context, const FormatStyle &style) {
   VLOG(3) << "Spacing between " << svfmt::TokenEnumName(left.TokenEnum())
           << " and " << svfmt::TokenEnumName(right.TokenEnum());
+  // svfmt: never glue two operators into another one (compact rules such as
+  // the one inside "[]" would turn "a[b + +c]" into "a[b++c]").
+  const auto is_text = [](const PreFormatToken &t) {
+    return t.format_token_enum == FormatTokenType::eol_comment ||
+           t.format_token_enum == FormatTokenType::comment_block ||
+           t.TokenEnum() == TK_StringLiteral;
+  };
+  if (!is_text(left) && !is_text(right) &&
+      WouldLexAsLongerOperator(left.token->text(), right.token->text())) {
+    return {1, "Operators that would merge into another one stay apart"};
+  }
+  // svfmt: "export *::*;" is one word.
+  if (IsInside(right_context, SyntaxKind::PackageExportAllDeclaration) &&
+      (left.TokenEnum() == TK_SCOPE_RES || right.TokenEnum() == TK_SCOPE_RES)) {
+    return {0, "No space around '::' in \"export *::*\""};
+  }
+  // svfmt: "output .y(x)": the direction and the '.' of an explicit port.
+  if (right.TokenEnum() == '.' && DirectParentIs(right_context, SyntaxKind::ExplicitAnsiPort) &&
+      left.format_token_enum == FormatTokenType::keyword) {
+    return {1, "Space between a port direction and an explicit port's '.'"};
+  }
+  // svfmt: an escaped macro name ("`\\A") ends at whitespace, like an escaped
+  // identifier.
+  if (left.token->text().size() > 2 && left.token->text().substr(0, 2) == "`\\") {
+    return {1, "An escaped macro name ends at whitespace"};
+  }
+  // svfmt: "->" as a binary operator (constraint or logical implication) is
+  // spaced like one; the event trigger "->ev" and the goto repetition
+  // "b[->1:2]" are not.
+  const auto binary_arrow = [](const PreFormatToken &t, const SyntaxTreeContext &context) {
+    return t.TokenEnum() == _TK_RARROW && !IsInside(context, SyntaxKind::SequenceRepetition) &&
+           !IsInside(context, SyntaxKind::BlockingEventTriggerStatement) &&
+           !IsInside(context, SyntaxKind::NonblockingEventTriggerStatement);
+  };
+  if (binary_arrow(left, left_context) || binary_arrow(right, right_context)) {
+    return {1, "Space around a binary '->'"};
+  }
   // Higher precedence rules should be handled earlier in this function.
 
   // svfmt: after formal arguments kept as one verbatim token (they contain
@@ -210,6 +269,14 @@ static WithReason<int> SpacesRequiredBetween(
   if (left.TokenEnum() == MacroIdentifier && right.TokenEnum() == '(') {
     return {static_cast<int>(right.OriginalLeadingSpaces().length()),
             "Keep the spacing between a macro name and a '('."};
+  }
+
+  // svfmt: "`uvm_field_int (x, Y)": the safety check takes a macro defined
+  // elsewhere to be called only when '(' follows it directly, so joining them
+  // would change how its arguments are compared. Keep one space.
+  if (left.TokenEnum() == MacroCallId && right.TokenEnum() == '(' &&
+      !right.OriginalLeadingSpaces().empty()) {
+    return {1, "Keep a space between a macro name and its arguments."};
   }
 
   // svfmt: an edge descriptor ("1Z", "x0") is lexed as a number and an
@@ -291,8 +358,10 @@ static WithReason<int> SpacesRequiredBetween(
              t.format_token_enum == FormatTokenType::keyword;
     };
     // svfmt: never glue two words together ("a with [0+:1]" would become
-    // "awith"); Verible can't parse "with" here.
-    if (word_like(left) && !word_like(right)) {
+    // "awith"); Verible can't parse "with" here. Only the slice size before
+    // the operand list ("<<8{"), not every word inside the operands.
+    if (word_like(left) && right.TokenEnum() == '{' &&
+        DirectParentIs(right_context, SyntaxKind::StreamingConcatenationExpression)) {
       return {0, "No space around streaming operator slice size"};
     }
   }
@@ -360,6 +429,19 @@ static WithReason<int> SpacesRequiredBetween(
       right.TokenEnum() == verilog_tokentype::PP_define_body &&
       right.Text().starts_with("``") && right.OriginalLeadingSpaces().empty()) {
     return {0, "Preserve spacing in concatenated name"};
+  }
+
+  // svfmt: a number that is not the literal's own size ("#5 'hff", "##5 '1":
+  // a delay, then an unsized literal) keeps its space.
+  // The size and the base belong to the same literal node; "##5 'hff" has
+  // two of them.
+  const bool size_of_literal = DirectParentIs(left_context, SyntaxKind::IntegerVectorExpression) &&
+                               !left_context.empty() && !right_context.empty() &&
+                               &left_context.top() == &right_context.top();
+  if (left.format_token_enum == FormatTokenType::numeric_literal && !size_of_literal &&
+      (right.format_token_enum == FormatTokenType::numeric_base ||
+       right.TokenEnum() == TK_UnBasedNumber)) {
+    return {1, "A delay or count before an unsized literal"};
   }
 
   // Remove any extra spaces between numeric literals' width, base and digits.
@@ -488,6 +570,11 @@ static WithReason<int> SpacesRequiredBetween(
       // "type [packed...]" (space between type and packed dimensions)
       // avoid touching any expressions inside the packed dimensions
       return {1, "spacing before [packed dimensions] of declarations"};
+    }
+    // svfmt: a keyword is not indexed ("with [0 +: n]", "s_eventually [1:3]").
+    if (left.format_token_enum == FormatTokenType::keyword && left.TokenEnum() != TK_edge &&
+        left.TokenEnum() != TK_new) {
+      return {1, "Space between a keyword and '['"};
     }
     // All other contexts, such as "a[i]" indices, no space.
     return {0, "All other cases of \".*[\", no space"};
@@ -952,7 +1039,9 @@ static WithReason<SpacingOptions> BreakDecisionBetween(
         right.format_token_enum == FTT::eol_comment ||
         right.format_token_enum == FTT::comment_block)) ||
       (svfmt::IsInside(left_context, SyntaxKind::PragmaDirective) &&
-       svfmt::IsInside(right_context, SyntaxKind::PragmaDirective))) {
+       (svfmt::IsInside(right_context, SyntaxKind::PragmaDirective) ||
+        right.format_token_enum == FTT::eol_comment ||
+        right.format_token_enum == FTT::comment_block))) {
     return {SpacingOptions::kPreserve,
             "A `define or `pragma keeps its original line structure."};
   }
@@ -968,6 +1057,11 @@ static WithReason<SpacingOptions> BreakDecisionBetween(
   }
   if (left.TokenEnum() == MacroIdentifier && right.TokenEnum() == '(') {
     return {SpacingOptions::kPreserve, "Keep the spacing between a macro name and a '('."};
+  }
+  // svfmt: a line break between a macro name and its arguments would make
+  // them no longer read as its arguments.
+  if (left.TokenEnum() == MacroCallId && right.TokenEnum() == '(') {
+    return {SpacingOptions::kMustAppend, "Keep a macro's arguments with its name."};
   }
   // svfmt: "`W'b0": the macro is the size of the literal.
   if (left.TokenEnum() == MacroIdentifier &&
@@ -998,9 +1092,22 @@ static WithReason<SpacingOptions> BreakDecisionBetween(
           SyntaxKind::ElseDirective, SyntaxKind::EndIfDirective, SyntaxKind::IncludeDirective,
           SyntaxKind::UndefDirective, SyntaxKind::TimeScaleDirective,
           SyntaxKind::DefaultNetTypeDirective, SyntaxKind::ResetAllDirective,
-          SyntaxKind::PragmaDirective}) {
-      if (svfmt::IsInside(left_context, kind) && !svfmt::IsInside(right_context, kind)) {
+          SyntaxKind::PragmaDirective, SyntaxKind::LineDirective,
+          SyntaxKind::UndefineAllDirective, SyntaxKind::CellDefineDirective,
+          SyntaxKind::EndCellDefineDirective, SyntaxKind::BeginKeywordsDirective,
+          SyntaxKind::EndKeywordsDirective, SyntaxKind::UnconnectedDriveDirective,
+          SyntaxKind::NoUnconnectedDriveDirective}) {
+      // The directive node itself, not just its kind: two consecutive
+      // "`undefineall" are two lines.
+      const verible::Symbol *left_directive = svfmt::NearestOfKind(left_context, kind);
+      const verible::Symbol *right_directive = svfmt::NearestOfKind(right_context, kind);
+      if (left_directive != nullptr && left_directive != right_directive) {
         return {SpacingOptions::kMustWrap, "A directive ends its line."};
+      }
+      // svfmt: and starts one ("`line" numbers the next line; none of these
+      // follows code on its line), also inside an expression or a header.
+      if (right_directive != nullptr && right_directive != left_directive) {
+        return {SpacingOptions::kMustWrap, "A directive starts its line."};
       }
     }
   }

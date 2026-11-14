@@ -831,6 +831,12 @@ void ReshapeFittingSubpartitions(const BasicFormatStyle &style,
   if (node->Children().size() < 2) {
     return;
   }
+  // svfmt: only [header] [args] [trailer] can be regrouped; the node is
+  // rebuilt from those three, so a fourth child (e.g. a ';' after a ')' with
+  // an end-of-line comment) would be dropped.
+  if (node->Children().size() > 3) {
+    return;
+  }
 
   // Partition with arguments should have at least one argument
   const auto &children = node->Children();
