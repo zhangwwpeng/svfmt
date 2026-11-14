@@ -1,6 +1,7 @@
 # Handoff notes (2026-11-14)
 
-State at pause time (latest commit `b479f2e` + uncommitted working-tree fixes from 2026-11-12..14); read this first when resuming.
+State at pause time (2026-11-14, after the review-rounds and alignment
+commit); read this first when resuming.
 
 ## Goals and results
 - Safety first: formatting never changes the token stream. A file that
@@ -34,14 +35,13 @@ State at pause time (latest commit `b479f2e` + uncommitted working-tree fixes fr
 - Verible source (reference for porting): ~/workspace/ref/verible (085eef05);
   oracle binary ~/workspace/ref/verible-bin/.../verible-verilog-format
   (only to compare behavior by hand now).
-- The editor uses ~/.local/bin/svfmt (currently still from `b479f2e`,
-  2026-11-12; update from `build-dev/svfmt` after a clean corpus run and
-  commit) through conform.nvim with --failsafe_success=false.
-- Working tree status: `src/`, `docs/handoff.md`, and new regression tests
-  (`tests/inputs/{directive_same_line,review_*}.sv`) have uncommitted edits.
-  `build-dev/svfmt` is built from the current tree and passes `ctest
-  --test-dir build-dev` (`format_inputs`). Review artifacts (`agy*.md`,
-  `pi.md`, `vibe.md`, `reports/`) are untracked.
+- The editor uses ~/.local/bin/svfmt (installed from `83625fe` on
+  2026-11-14, after the clean corpus runs) through conform.nvim with
+  --failsafe_success=false.
+- Working tree status: clean except review artifacts (`agy*.md`, `pi.md`,
+  `vibe.md`, `reports/`), which are untracked and not part of the repo.
+  `build-dev/svfmt` is built from `83625fe` and passes `ctest --test-dir
+  build-dev` (`format_inputs`).
 
 ## Commands
 ```sh
