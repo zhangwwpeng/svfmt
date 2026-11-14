@@ -9,18 +9,24 @@ layout optimizer, tabular alignment, and comment controls. Its yacc parser is
 replaced by slang, which supports all of IEEE 1800-2023. The command-line
 flags are the same as `verible-verilog-format`'s.
 
-## Status
+## Status (v1.0)
 
 - Formats modules, ports, parameters, instances, statements, functions and
   tasks, classes, packages, generate blocks, macros and `` `ifdef `` regions.
-- Of 2111 inputs taken from Verible's own formatter tests, **1656 produce
-  output byte-identical to `verible-verilog-format`**. 381 are rejected, most
-  of them because they are not legal SystemVerilog (see
-  [docs/deviations.md](docs/deviations.md)), and the rest differ. No input
-  crashes.
-- On failure, svfmt prints the input unchanged, like Verible. Failures
-  include a parse error, a construct the bridge can't represent, or output
-  that doesn't re-parse to the same tokens.
+- Safety: every output is checked against the input twice, with the
+  re-parsed token stream and with the raw lexer (inactive `` `ifdef ``
+  branches, `` `define ``/`` `pragma `` line ends, UDP tables); whole-file
+  formatting also checks convergence. A file that cannot be formatted safely
+  is printed unchanged.
+- Corpus `../sv_test` (26,522 files, 01-09) with the default flags and with
+  the nvim alignment flags: 0 semantic_change / not_idempotent / crash /
+  timeout.
+- `--try_wrap_long_lines` (off by default): 15 known not_idempotent files and
+  1 timeout, all safe rejections (see
+  [docs/handoff.md](docs/handoff.md) item 1).
+- Differential preprocessor check against slang's own preprocessor (26,522
+  files, several define sets): 0 differences. Mutation test of the safety
+  checks (500-file sample): 0 failures.
 
 ## Build
 

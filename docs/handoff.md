@@ -1,7 +1,7 @@
 # Handoff notes (2026-11-14)
 
-State at pause time (2026-11-14, after the review-rounds and alignment
-commit); read this first when resuming.
+State at pause time (v1.0, 2026-11-14, after the review-rounds and
+alignment commit); read this first when resuming.
 
 ## Goals and results
 - Safety first: formatting never changes the token stream. A file that

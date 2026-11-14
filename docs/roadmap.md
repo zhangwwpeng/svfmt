@@ -13,33 +13,30 @@
 - [x] Excerpt parse modes and automatic module-body retry
 - [x] Undefined macros: tolerated, with stub re-parse
 - [x] `` `ifdef ``: all-branches parse with fallback
-- [x] Differential test infrastructure (Verible corpus, 1656/2111 identical vs Verible v0.0-4298)
+- [x] v1.0: corpus `../sv_test` (26,522 files, 01-09) with default flags and
+      with the nvim alignment flags: 0 semantic_change / not_idempotent /
+      crash / timeout
+- [x] v1.0: differential preprocessor check against slang's preprocessor
+      (26,522 files, several define sets): 0 differences; mutation test of
+      the safety checks (500-file sample): 0 failures
 
-## Next (ordered by test impact)
+## Known limitations (v1.0)
 
-1. Remaining `diff` cases, grouped by source test file:
-   - `formatter_disable_test` (mostly generic constructs)
-   - `formatter_align_test`
-   - `formatter_function_task_test`
-   - `formatter_module_test`
-   - `formatter_wrap_style_test`
-   - `formatter_macro_test`
-   - `formatter_class_package_test`
-2. Unmapped constructs:
-   - UDP primitives and tables
-   - specify blocks
-   - clocking blocks
-   - covergroups, coverpoints and bins
-   - assertion and property bodies
-   - `randomize() with {}`
-   - constraint blocks
-   - DPI import/export
-   - modports
-   - `bind`
-3. System and macro call stacking (`MacroCallReshaper`) for nested calls.
-4. `--lines` partial formatting tests.
-5. Corpus runs on real code (OpenTitan, Ibex, CVA6) and documenting the
-   remaining deviations.
+1. `--try_wrap_long_lines` is off by default. With it, 15 files are
+   `not_idempotent` and 1 times out; all are safe rejections (the input is
+   echoed). The cause is diagnosed in
+   [handoff.md](handoff.md) item 1; not being fixed by decision.
+2. Known safe rejections (input echoed, no semantic change):
+   - `` `endif `` in the middle of a wrapped expression, comments after
+     `` `else // c ``, `infer` alignment flips on leading-comma and continued
+     parameter lists, a comment line between `end` and `else`;
+   - files that need `--define` macros, macros defined both ways across
+     branches, `` `ifdef (X) `` inside macro arguments, some `` `define ``
+     continuations followed by block comments.
+3. The differential preprocessor check masks macro-produced values (they can
+   depend on `` `__LINE__ ``/`` `__FILE__ `` or on a moved macro call); the
+   raw lexer check covers the macro body and its arguments. Mutation testing
+   has run on a 500-file sample, not the full corpus.
 
 ## Later
 
