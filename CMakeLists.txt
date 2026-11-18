@@ -86,6 +86,10 @@ if(SVFMT_BUILD_TESTS)
              COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_mutation.py
                      ${CMAKE_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/tests/inputs
                      --mutations 6 --format)
+    add_test(NAME cli_regression
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_cli_regression.py
+                     $<TARGET_FILE:svfmt>
+                     ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_format_inputs.sh)
   endif()
   if(Python3_FOUND AND SVFMT_CORPUS_DIR)
     add_test(NAME corpus

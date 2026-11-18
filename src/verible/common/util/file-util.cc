@@ -270,6 +270,86 @@ absl::Status SetContents(std::string_view filename, std::string_view content) {
   return absl::OkStatus();
 }
 
+absl::Status ReplaceContentsAtomically(std::string_view filename,
+                                       std::string_view content) {
+  std::error_code error;
+  // fopen("wb") follows symlinks. Preserve that behavior while replacing the
+  // resolved file, rather than replacing the symlink itself.
+  const fs::path target = fs::canonical(std::string(filename), error);
+  if (error) return CreateErrorStatusFromErr(filename, error, "can't resolve file");
+  const auto permissions = fs::status(target, error).permissions();
+  if (error) return CreateErrorStatusFromErr(filename, error, "can't stat file");
+  // Replacing a file only requires write access to its directory on POSIX.
+  // Match the old fopen("wb") behavior for a read-only target.
+  const int writability_probe =
+#ifdef _WIN32
+      _open(target.string().c_str(), _O_WRONLY | _O_BINARY);
+#else
+      open(target.c_str(), O_WRONLY);
+#endif
+  if (writability_probe < 0) return CreateErrorStatusFromErrno(filename, "can't write");
+#ifdef _WIN32
+  _close(writability_probe);
+#else
+  close(writability_probe);
+#endif
+
+  std::string temporary = target.string() + ".svfmt-XXXXXX";
+  int fd;
+#ifdef _WIN32
+  if (_mktemp_s(temporary.data(), temporary.size() + 1) != 0) {
+    return absl::UnknownError(absl::StrCat(filename, ": can't create temporary name"));
+  }
+  fd = _open(temporary.c_str(), _O_CREAT | _O_EXCL | _O_WRONLY | _O_BINARY,
+             _S_IREAD | _S_IWRITE);
+#else
+  fd = mkstemp(temporary.data());
+#endif
+  if (fd < 0) return CreateErrorStatusFromErrno(filename, "can't create temporary file");
+
+#ifdef _WIN32
+  FILE *out = _fdopen(fd, "wb");
+#else
+  FILE *out = fdopen(fd, "wb");
+#endif
+  if (!out) {
+#ifdef _WIN32
+    _close(fd);
+#else
+    close(fd);
+#endif
+    const int open_error = errno;
+    fs::remove(temporary, error);
+    return CreateErrorStatusFromSysError(filename, open_error, "can't open temporary file");
+  }
+
+  while (!content.empty()) {
+    const size_t written = fwrite(content.data(), 1, content.size(), out);
+    if (written == 0) {
+      const int write_error = errno;
+      fclose(out);
+      fs::remove(temporary, error);
+      return CreateErrorStatusFromSysError(filename, write_error, "can't write");
+    }
+    content.remove_prefix(written);
+  }
+  if (fclose(out) != 0) {
+    const int close_error = errno;
+    fs::remove(temporary, error);
+    return CreateErrorStatusFromSysError(filename, close_error, "can't close temporary file");
+  }
+
+  fs::permissions(temporary, permissions, fs::perm_options::replace, error);
+  if (!error) fs::rename(temporary, target, error);
+  if (error) {
+    const auto status = CreateErrorStatusFromErr(filename, error, "can't replace file");
+    std::error_code ignored;
+    fs::remove(temporary, ignored);
+    return status;
+  }
+  return absl::OkStatus();
+}
+
 std::string JoinPath(std::string_view base, std::string_view name) {
   fs::path p = fs::path(std::string(base)) / fs::path(std::string(name));
   return p.lexically_normal().string();

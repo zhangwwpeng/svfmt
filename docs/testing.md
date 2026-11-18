@@ -8,6 +8,7 @@ body-level parameter alignment.
 | Test | What it checks |
 | --- | --- |
 | `format_inputs` | Every `tests/inputs/*.sv` formats with `--failsafe_success=false --verify_convergence`. That covers parsing, the lossless bridge, re-parse, lexical equivalence and idempotence. |
+| `cli_regression` | Checks atomic `--inplace` replacement, symlinks, permissions, exact golden output bytes and line-sensitive macro safety. |
 | `corpus` | Only if `-DSVFMT_CORPUS_DIR=<dir>` is set. See below. |
 
 ## Corpus test (real code)

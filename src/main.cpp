@@ -278,7 +278,7 @@ static bool formatOneFile(std::string_view filename,
       // mess with tools that look for timestamp changes (such as make).
       if (file_changed) {
         if (auto status =
-                verible::file::SetContents(filename, formatted_output);
+                verible::file::ReplaceContentsAtomically(filename, formatted_output);
             !status.ok()) {
           FileMsg(filename) << "error writing result " << status << std::endl;
           return false;

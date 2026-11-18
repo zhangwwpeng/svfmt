@@ -86,6 +86,11 @@ absl::StatusOr<std::unique_ptr<MemBlock>> GetContentAsMemBlock(
 // Create file "filename" and store given content in it.
 absl::Status SetContents(std::string_view filename, std::string_view content);
 
+// Replace an existing file only after its complete new contents have been
+// written. Resolves symlinks so that a symlink passed as filename is retained.
+absl::Status ReplaceContentsAtomically(std::string_view filename,
+                                       std::string_view content);
+
 // Join directory + filename and lightly canonicalize.
 // The canonicalization step unifies ./ and ../ path elements lexically
 // without looking at the underlying file-system.
