@@ -20,7 +20,7 @@
 
 #ifndef VERILOG_TOKENTYPE
 #define VERILOG_TOKENTYPE
-enum verilog_tokentype {
+enum verilog_tokentype : int {
   yyToken_EOF = 0,
   PP_Identifier = 258,
   PP_include = 259,

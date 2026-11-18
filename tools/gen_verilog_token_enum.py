@@ -46,7 +46,9 @@ print("#define VERIBLE_VERILOG_TOKEN_ENUM_H_")
 print()
 print("#ifndef VERILOG_TOKENTYPE")
 print("#define VERILOG_TOKENTYPE")
-print("enum verilog_tokentype {")
+# svfmt adds synthetic tokens above Verible's enum range; a fixed underlying
+# type makes conversions of those values well-defined.
+print("enum verilog_tokentype : int {")
 for name, value, _ in out:
     print(f"  {name} = {value},")
 print("};")
