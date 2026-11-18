@@ -178,12 +178,18 @@ absl::StatusOr<std::string> GetContentAsString(std::string_view filename) {
     return CreateErrorStatusFromErrno(filename, "can't read");
   }
   char buffer[4096];
-  int bytes_read;
-  while (!ferror(stream) && !feof(stream) &&
-         (bytes_read = fread(buffer, 1, sizeof(buffer), stream)) >= 0) {
+  bool failed = false;
+  int read_error = 0;
+  for (;;) {
+    const size_t bytes_read = fread(buffer, 1, sizeof(buffer), stream);
     content.append(buffer, bytes_read);
+    if (bytes_read == sizeof(buffer)) continue;
+    failed = ferror(stream);
+    if (failed) read_error = errno;
+    break;
   }
-  fclose(stream);
+  if (!use_stdin) fclose(stream);
+  if (failed) return CreateErrorStatusFromSysError(filename, read_error, "can't read");
 
   return content;
 }
@@ -249,15 +255,16 @@ absl::Status SetContents(std::string_view filename, std::string_view content) {
   VLOG(1) << __FUNCTION__ << ": Writing file: " << filename;
   FILE *out = fopen(std::string(filename).c_str(), "wb");
   if (!out) return CreateErrorStatusFromErrno(filename, "can't write.");
-  const int64_t expected_write = content.size();
-  int64_t total_written = 0;
   while (!content.empty()) {
-    int64_t w = fwrite(content.data(), 1, content.size(), out);
-    total_written += w;
+    const size_t w = fwrite(content.data(), 1, content.size(), out);
+    if (w == 0) {
+      const int write_error = errno;
+      fclose(out);
+      return CreateErrorStatusFromSysError(filename, write_error, "can't write");
+    }
     content.remove_prefix(w);
   }
-  const bool written_completely = (total_written == expected_write);
-  if (fclose(out) != 0 || !written_completely) {
+  if (fclose(out) != 0) {
     return CreateErrorStatusFromErrno(filename, "closing.");
   }
   return absl::OkStatus();
