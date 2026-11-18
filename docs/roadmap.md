@@ -33,10 +33,13 @@
    - files that need `--define` macros, macros defined both ways across
      branches, `` `ifdef (X) `` inside macro arguments, some `` `define ``
      continuations followed by block comments.
-3. The differential preprocessor check masks macro-produced values (they can
-   depend on `` `__LINE__ ``/`` `__FILE__ `` or on a moved macro call); the
-   raw lexer check covers the macro body and its arguments. Mutation testing
-   has run on a 500-file sample, not the full corpus.
+3. The external differential preprocessor tool masks macro-produced values
+   because it compares files with different paths. The formatter itself
+   compares active macro expansions under the same source name and checks
+   direct `` `__LINE__ `` locations across all branches. Indirect line-sensitive
+   macro uses in inactive branches under a different define set remain a
+   limitation. Mutation testing has run on a 500-file sample, not the full
+   corpus.
 
 ## Later
 

@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <charconv>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -33,6 +34,11 @@
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_split.h"
+#include "slang/diagnostics/Diagnostics.h"
+#include "slang/parsing/Preprocessor.h"
+#include "slang/text/SourceManager.h"
+#include "slang/util/Bag.h"
+#include "slang/util/BumpAllocator.h"
 #include "verible/common/formatting/basic-format-style.h"
 #include "verible/common/formatting/format-token.h"
 #include "verible/common/formatting/layout-optimizer.h"
@@ -235,6 +241,77 @@ static Status ReformatVerilog(std::string_view original_text,
 static absl::StatusOr<std::unique_ptr<svfmt::SlangAnalyzer>> ParseWithStatus(
     std::string_view text, std::string_view filename) {
   return svfmt::SlangAnalyzer::Analyze(text, filename, svfmt::GlobalAnalyzerOptions());
+}
+
+// Lexical equivalence alone cannot protect line-sensitive macro expansions:
+// moving `__LINE__ (or a macro that expands to it) changes the program while
+// leaving the source tokens identical. Compare all macro-produced tokens with
+// the same source name and preprocessor settings on both sides.
+static std::vector<std::pair<int, std::string>> ExpandedMacroTokens(
+    std::string_view text, std::string_view filename) {
+  slang::SourceManager source_manager;
+  slang::BumpAllocator allocator;
+  slang::Diagnostics diagnostics;
+  slang::Bag bag;
+  slang::parsing::PreprocessorOptions options;
+  options.languageVersion = slang::LanguageVersion::v1800_2023;
+  const auto &analyzer_options = svfmt::GlobalAnalyzerOptions();
+  options.predefines = analyzer_options.defines;
+  for (const auto &dir : analyzer_options.include_dirs) {
+    options.additionalIncludePaths.emplace_back(dir);
+  }
+  bag.set(options);
+  slang::parsing::Preprocessor preprocessor(source_manager, allocator,
+                                           diagnostics, bag);
+  preprocessor.pushSource(text, filename);
+  std::vector<std::pair<int, std::string>> tokens;
+  for (;;) {
+    const auto token = preprocessor.next();
+    if (token.kind == slang::parsing::TokenKind::EndOfFile) break;
+    if (source_manager.isMacroLoc(token.location())) {
+      tokens.emplace_back(static_cast<int>(token.kind), token.rawText());
+    }
+  }
+  return tokens;
+}
+
+// The active preprocessor pass does not see inactive conditional branches.
+// Keep direct uses of `__LINE__ on the same source line in every branch.
+static std::vector<size_t> IntrinsicLineNumbers(std::string_view text) {
+  std::vector<size_t> lines;
+  size_t logical_line = 1;
+  for (size_t begin = 0; begin < text.size();) {
+    const size_t newline = text.find('\n', begin);
+    const size_t end = newline == std::string_view::npos ? text.size() : newline;
+    const std::string_view source_line = text.substr(begin, end - begin);
+    for (size_t at = source_line.find("`__LINE__"); at != std::string_view::npos;
+         at = source_line.find("`__LINE__", at + 1)) {
+      const size_t after = at + sizeof("`__LINE__") - 1;
+      if (after == source_line.size() ||
+          !(std::isalnum(static_cast<unsigned char>(source_line[after])) ||
+            source_line[after] == '_')) {
+        lines.push_back(logical_line);
+      }
+    }
+    // `line changes the logical number of the *next* source line.
+    const size_t first = source_line.find_first_not_of(" \t");
+    if (first != std::string_view::npos &&
+        source_line.substr(first).starts_with("`line ")) {
+      const std::string_view number = source_line.substr(first + sizeof("`line ") - 1);
+      size_t next_line = 0;
+      if (std::from_chars(number.data(), number.data() + number.size(), next_line).ec ==
+          std::errc{}) {
+        logical_line = next_line;
+      } else {
+        ++logical_line;
+      }
+    } else {
+      ++logical_line;
+    }
+    if (newline == std::string_view::npos) break;
+    begin = newline + 1;
+  }
+  return lines;
 }
 
 // svfmt: an inactive `ifdef / `else branch is kept verbatim when the branches
@@ -611,6 +688,14 @@ Status FormatVerilog(std::string_view text, std::string_view filename,
         "Formatted output is lexically different from the input.    "
         "Please file a bug.  Details:\n",
         *difference));
+  }
+  if (original_text.find('`') != std::string_view::npos &&
+      original_text != formatted_text) {
+    if (IntrinsicLineNumbers(original_text) != IntrinsicLineNumbers(formatted_text) ||
+        ExpandedMacroTokens(original_text, filename) !=
+            ExpandedMacroTokens(formatted_text, filename)) {
+      return absl::DataLossError("Formatting changes a macro expansion or `__LINE__ location.");
+    }
   }
 
   // When formatting whole-file (no --lines are specified), ensure that

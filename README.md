@@ -13,11 +13,12 @@ flags are the same as `verible-verilog-format`'s.
 
 - Formats modules, ports, parameters, instances, statements, functions and
   tasks, classes, packages, generate blocks, macros and `` `ifdef `` regions.
-- Safety: every output is checked against the input twice, with the
+- Safety: every output is checked against the input with the
   re-parsed token stream and with the raw lexer (inactive `` `ifdef ``
-  branches, `` `define ``/`` `pragma `` line ends, UDP tables); whole-file
-  formatting also checks convergence. A file that cannot be formatted safely
-  is printed unchanged.
+  branches, `` `define ``/`` `pragma `` line ends, UDP tables). Macro
+  expansions and `` `__LINE__ `` locations are also checked; whole-file
+  formatting checks convergence. A file that cannot be formatted safely is
+  printed unchanged.
 - Corpus `../sv_test` (26,522 files, 01-09) with the default flags and with
   the nvim alignment flags: 0 semantic_change / not_idempotent / crash /
   timeout.

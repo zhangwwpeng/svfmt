@@ -26,6 +26,7 @@ file.sv ─► slang Preprocessor + Parser ─► slang SyntaxTree
    line-wrap-searcher, layout-optimizer, align engine, partition tree ops
    ▼
  verification: re-parse output with slang, compare non-whitespace tokens,
+ raw-lexer tokens and macro expansions; check `__LINE__ locations;
  optional convergence check (format twice)
 ```
 
