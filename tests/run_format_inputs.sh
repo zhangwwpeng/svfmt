@@ -9,9 +9,11 @@ dir="$2"
 expected="$3"
 fail=0
 err=$(mktemp)
+out=$(mktemp)
+trap 'rm -f "$err" "$out"' EXIT
 for f in "$dir"/*.sv; do
   name=$(basename "$f")
-  if ! out=$("$svfmt" --failsafe_success=false --verify_convergence "$f" 2>"$err"); then
+  if ! "$svfmt" --failsafe_success=false --verify_convergence "$f" >"$out" 2>"$err"; then
     echo "FAIL: $f"; head -5 "$err"
     fail=1
     continue
@@ -19,11 +21,10 @@ for f in "$dir"/*.sv; do
   if [ ! -f "$expected/$name" ]; then
     echo "MISSING EXPECTED: $expected/$name (run tests/update_expected.sh)"
     fail=1
-  elif ! printf '%s\n' "$out" | cmp -s - "$expected/$name"; then
+  elif ! cmp -s "$out" "$expected/$name"; then
     echo "CHANGED: $name differs from $expected/$name"
-    printf '%s\n' "$out" | diff "$expected/$name" - | head -10
+    diff "$expected/$name" "$out" | head -10
     fail=1
   fi
 done
-rm -f "$err"
 exit $fail

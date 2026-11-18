@@ -41,6 +41,7 @@ ok_search_limit (safe: the input is echoed).
 Exit status is non-zero if any safety check fails.
 """
 import argparse
+import atexit
 import json
 import shlex
 import concurrent.futures as cf
@@ -91,6 +92,7 @@ for root, dirs, names in os.walk(args.corpus, followlinks=True):
             files.append(path)
 files.sort()
 tmpdir = tempfile.mkdtemp(prefix='svfmt_corpus_')
+atexit.register(shutil.rmtree, tmpdir, ignore_errors=True)
 
 
 def run(cmd, data=None):
