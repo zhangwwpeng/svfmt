@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "svfmt/slang-analyzer.h"
+#include "verible/common/strings/utf8.h"
 
 #include "verible/common/strings/comment-utils.h"
 
@@ -407,7 +408,8 @@ class SlangAnalyzer::Builder {
     size_t i = 0;
     while (i < text.size()) {
       size_t j = i;
-      if (text[i] == '\n') {
+      if (text[i] == '\n' ||
+          (text[i] == '\r' && (i + 1 == text.size() || text[i + 1] != '\n'))) {
         j = i + 1;
         Emit(TK_NEWLINE, text.substr(i, 1));
       } else if (text[i] == '\r' && i + 1 < text.size() && text[i + 1] == '\n') {
@@ -415,8 +417,7 @@ class SlangAnalyzer::Builder {
         j = i + 1;
         Emit(TK_SPACE, text.substr(i, 1));
       } else {
-        while (j < text.size() && text[j] != '\n' &&
-               !(text[j] == '\r' && j + 1 < text.size() && text[j + 1] == '\n')) {
+        while (j < text.size() && text[j] != '\n' && text[j] != '\r') {
           j++;
         }
         Emit(TK_SPACE, text.substr(i, j - i));
@@ -2274,6 +2275,7 @@ std::string TabsToSpaces(std::string_view text, int width) {
 
 absl::StatusOr<std::unique_ptr<SlangAnalyzer>> SlangAnalyzer::Analyze(
     std::string_view text, std::string_view filename, const AnalyzerOptions &options) {
+  if (text.starts_with(verible::kUtf8Bom)) text.remove_prefix(verible::kUtf8Bom.size());
   // Tabs are formatted as spaces (outside comments and strings).
   const std::string spaced = TabsToSpaces(text, options.tab_width);
   text = spaced;

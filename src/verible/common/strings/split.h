@@ -116,10 +116,8 @@ std::function<std::string_view()> MakeStringSpliterator(
 // line as a whole line.
 std::vector<std::string_view> SplitLines(std::string_view text);
 
-// Returns line-based view of original text. Keeps the trailing \n.
-// Lines in the returned vector include the trailing \n.
-// If original text did not terminate with a \n, interpret the final partial
-// line as a whole line.
+// Splits on LF, CRLF or CR and keeps the original line terminators.
+// Includes any final partial line.
 std::vector<std::string_view> SplitLinesKeepLineTerminator(
     std::string_view text);
 

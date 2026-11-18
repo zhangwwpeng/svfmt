@@ -67,6 +67,9 @@ target_link_libraries(svfmt-preproc-cmp PRIVATE slang::slang)
 
 if(SVFMT_BUILD_TESTS)
   enable_testing()
+  add_executable(svfmt-format-range-test tests/format_range_regression.cc)
+  target_link_libraries(svfmt-format-range-test PRIVATE svfmt_core)
+  add_test(NAME format_range COMMAND svfmt-format-range-test)
   add_test(NAME format_inputs
            COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_format_inputs.sh $<TARGET_FILE:svfmt>
                    ${CMAKE_CURRENT_SOURCE_DIR}/tests/inputs

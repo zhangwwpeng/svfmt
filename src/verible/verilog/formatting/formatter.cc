@@ -16,14 +16,15 @@
 
 #include <algorithm>
 #include <cctype>
-#include <charconv>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <functional>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -35,6 +36,7 @@
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_split.h"
 #include "slang/diagnostics/Diagnostics.h"
+#include "slang/parsing/Lexer.h"
 #include "slang/parsing/Preprocessor.h"
 #include "slang/text/SourceManager.h"
 #include "slang/util/Bag.h"
@@ -120,6 +122,7 @@ class Formatter {
 
   // Ranges of text where formatter is disabled (by comment directives).
   ByteOffsetSet disabled_ranges_;
+  bool line_limited_ = false;
 
   // Set of formatted lines, populated by calling Format().
   std::vector<verible::FormattedExcerpt> formatted_lines_;
@@ -275,42 +278,173 @@ static std::vector<std::pair<int, std::string>> ExpandedMacroTokens(
   return tokens;
 }
 
-// The active preprocessor pass does not see inactive conditional branches.
-// Keep direct uses of `__LINE__ on the same source line in every branch.
-static std::vector<size_t> IntrinsicLineNumbers(std::string_view text) {
-  std::vector<size_t> lines;
-  size_t logical_line = 1;
-  for (size_t begin = 0; begin < text.size();) {
-    const size_t newline = text.find('\n', begin);
-    const size_t end = newline == std::string_view::npos ? text.size() : newline;
-    const std::string_view source_line = text.substr(begin, end - begin);
-    for (size_t at = source_line.find("`__LINE__"); at != std::string_view::npos;
-         at = source_line.find("`__LINE__", at + 1)) {
-      const size_t after = at + sizeof("`__LINE__") - 1;
-      if (after == source_line.size() ||
-          !(std::isalnum(static_cast<unsigned char>(source_line[after])) ||
-            source_line[after] == '_')) {
-        lines.push_back(logical_line);
-      }
+// Raw lexing also sees inactive branches, and keeps comments and strings
+// separate from actual macro tokens. Follow definitions visible at each use,
+// retaining alternatives when the definition depends on a conditional branch.
+static std::vector<std::pair<bool, size_t>> IntrinsicLineNumbers(std::string_view text) {
+  using slang::parsing::TokenKind;
+  using slang::parsing::TriviaKind;
+  using slang::syntax::SyntaxKind;
+  if (text.find("__LINE__") == std::string_view::npos) return {};
+
+  slang::SourceManager source_manager;
+  slang::BumpAllocator allocator;
+  slang::Diagnostics diagnostics;
+  auto buffer = source_manager.assignText("<svfmt-line-check>", text);
+  slang::parsing::LexerOptions options;
+  options.languageVersion = slang::LanguageVersion::v1800_2023;
+  slang::parsing::Lexer lexer(buffer, allocator, diagnostics, source_manager, options);
+
+  auto macro_name = [](std::string_view name) {
+    if (name.starts_with('`')) name.remove_prefix(1);
+    if (name.starts_with('\\')) name.remove_prefix(1);
+    while (!name.empty() && (name.back() == ' ' || name.back() == '\t')) {
+      name.remove_suffix(1);
     }
-    // `line changes the logical number of the *next* source line.
-    const size_t first = source_line.find_first_not_of(" \t");
-    if (first != std::string_view::npos &&
-        source_line.substr(first).starts_with("`line ")) {
-      const std::string_view number = source_line.substr(first + sizeof("`line ") - 1);
-      size_t next_line = 0;
-      if (std::from_chars(number.data(), number.data() + number.size(), next_line).ec ==
-          std::errc{}) {
-        logical_line = next_line;
+    return name;
+  };
+  std::map<std::string_view, std::set<std::string_view>> dependencies;
+  std::set<std::string_view> sensitive{"__LINE__"};
+  bool definitions_changed = false;
+  auto is_sensitive = [&](std::string_view name) {
+    if (definitions_changed) {
+      std::map<std::string_view, std::vector<std::string_view>> dependents;
+      for (const auto &[owner, refs] : dependencies) {
+        for (const auto ref : refs) dependents[ref].push_back(owner);
+      }
+      sensitive = {"__LINE__"};
+      std::vector<std::string_view> pending{"__LINE__"};
+      while (!pending.empty()) {
+        const auto it = dependents.find(pending.back());
+        pending.pop_back();
+        if (it == dependents.end()) continue;
+        for (const auto dependent : it->second) {
+          if (sensitive.insert(dependent).second) pending.push_back(dependent);
+        }
+      }
+      definitions_changed = false;
+    }
+    return sensitive.contains(name);
+  };
+  std::vector<std::pair<bool, size_t>> lines;
+  std::vector<size_t> conditional_resets;
+  std::string_view definition;
+  bool expect_name = false;
+  bool expect_undef = false;
+  bool after_name = false;
+  bool escaped_name = false;
+  int formal_depth = 0;
+  bool continuation = false;
+  int conditional_depth = 0;
+  size_t base_line = 0;
+  size_t base_number = 1;
+
+  for (auto token = lexer.lex(); token.kind != TokenKind::EndOfFile;
+       token = lexer.lex()) {
+    for (const auto& trivia : token.trivia()) {
+      if (trivia.kind == TriviaKind::EndOfLine) {
+        if (!continuation && formal_depth == 0) {
+          definition = {};
+          expect_name = after_name = expect_undef = false;
+        }
+        continuation = false;
       } else {
-        ++logical_line;
+        // Slang also recognizes a trailing backslash in a macro line comment.
+        continuation = trivia.kind == TriviaKind::LineComment &&
+                       trivia.getRawText().ends_with('\\');
       }
-    } else {
-      ++logical_line;
     }
-    if (newline == std::string_view::npos) break;
-    begin = newline + 1;
+    continuation = token.kind == TokenKind::LineContinuation ||
+                   (token.kind == TokenKind::Identifier &&
+                    token.rawText().ends_with('\\'));
+    if (expect_name) {
+      escaped_name = token.rawText().starts_with('\\');
+      definition = macro_name(token.rawText());
+      if (conditional_depth == 0 && dependencies.erase(definition) != 0) {
+        definitions_changed = true;
+      }
+      expect_name = false;
+      after_name = true;
+      continue;
+    }
+    if (expect_undef) {
+      if (dependencies.erase(macro_name(token.rawText())) != 0) {
+        definitions_changed = true;
+      }
+      expect_undef = false;
+      continue;
+    }
+    if (after_name) {
+      after_name = false;
+      const auto trivia = token.trivia();
+      if (token.kind == TokenKind::OpenParenthesis &&
+          (trivia.empty() ||
+           (escaped_name && trivia.size() == 1 && trivia[0].getRawText() == " "))) {
+        formal_depth = 1;
+        continue;
+      }
+    }
+    if (formal_depth > 0) {
+      if (token.kind == TokenKind::OpenParenthesis) ++formal_depth;
+      if (token.kind == TokenKind::CloseParenthesis) --formal_depth;
+    }
+    if (token.kind != TokenKind::Directive) continue;
+    const auto kind = token.directiveKind();
+    if (kind == SyntaxKind::MacroUsage) {
+      const auto name = macro_name(token.rawText());
+      if (definition.empty()) {
+        if (is_sensitive(name)) {
+          // Include only conditional resets that could affect a sensitive use.
+          for (const auto reset : conditional_resets) lines.emplace_back(true, reset);
+          conditional_resets.clear();
+          const size_t line = source_manager.getLineNumber(token.location());
+          lines.emplace_back(false, base_number + line - base_line - 1);
+        }
+      } else {
+        if (dependencies[definition].insert(name).second) definitions_changed = true;
+      }
+    } else if (definition.empty()) {
+      switch (kind) {
+        case SyntaxKind::DefineDirective:
+          expect_name = true;
+          break;
+        case SyntaxKind::UndefDirective:
+          expect_undef = conditional_depth == 0;
+          break;
+        case SyntaxKind::UndefineAllDirective:
+          if (conditional_depth == 0 && !dependencies.empty()) {
+            dependencies.clear();
+            definitions_changed = true;
+          }
+          break;
+        case SyntaxKind::IfDefDirective:
+        case SyntaxKind::IfNDefDirective:
+          ++conditional_depth;
+          break;
+        case SyntaxKind::EndIfDirective:
+          if (conditional_depth > 0) --conditional_depth;
+          break;
+        case SyntaxKind::LineDirective: {
+          const size_t line = source_manager.getLineNumber(token.location());
+          const auto number = lexer.lex();
+          if (number.kind != TokenKind::IntegerLiteral) break;
+          const auto value = number.intValue().as<size_t>();
+          if (!value) break;
+          if (conditional_depth == 0) {
+            conditional_resets.clear();
+            base_line = line;
+            base_number = *value;
+          } else {
+            conditional_resets.push_back(base_number + line - base_line - 1);
+          }
+          break;
+        }
+        default:
+          break;
+      }
+    }
   }
+
   return lines;
 }
 
@@ -661,6 +795,8 @@ Status FormatVerilog(std::string_view text, std::string_view filename,
                      const FormatStyle &style, std::ostream &formatted_stream,
                      const LineNumberSet &lines,
                      const ExecutionControl &control) {
+  const bool has_bom = text.starts_with(verible::kUtf8Bom);
+  if (has_bom) text.remove_prefix(verible::kUtf8Bom.size());
   const std::string_view original_text = text;
   // Whole file only: line-restricted formatting keeps the text as it is.
   std::string prepared;
@@ -676,6 +812,9 @@ Status FormatVerilog(std::string_view text, std::string_view filename,
   Status format_status = FormatVerilog(text_structure, filename, style,
                                        &formatted_text, lines, control);
   // Commit formatted text to the output stream independent of status.
+  if (has_bom && (format_status.ok() || !formatted_text.empty())) {
+    formatted_stream << verible::kUtf8Bom;
+  }
   formatted_stream << formatted_text;
   if (!format_status.ok()) return format_status;
 
@@ -721,7 +860,13 @@ absl::Status FormatVerilogRange(const verible::TextStructureView &structure,
                                 std::string *formatted_text,
                                 const verible::Interval<int> &line_range,
                                 const ExecutionControl &control) {
-  if (line_range.empty()) {
+  if (line_range.min < 1 || !line_range.valid()) {
+    return absl::InvalidArgumentError("Formatting requires a valid 1-based line range.");
+  }
+  const auto &text_lines = structure.Lines();
+  const size_t first_line = line_range.min - 1;
+  if (line_range.empty() || first_line >= text_lines.size()) {
+    formatted_text->clear();
     return absl::OkStatus();
   }
 
@@ -749,11 +894,13 @@ absl::Status FormatVerilogRange(const verible::TextStructureView &structure,
   // beginning of the original range, erase it in the formatted output.
   // TODO(hzeller): This can go when whitespace handling is revisited.
   //                (Emit(), FormatWhitespaceWithDisabledByteRanges())
-  const auto &text_lines = structure.Lines();
-  const char unformatted_begin = *text_lines[line_range.min - 1].begin();
-  if (!formatted_text->empty() && (*formatted_text)[0] == '\n' &&
-      unformatted_begin != '\n') {
-    formatted_text->erase(0, 1);  // possibly expensive.
+  const auto original_first_line = text_lines[first_line];
+  if (!original_first_line.empty() && original_first_line.front() != '\r') {
+    if (formatted_text->starts_with("\r\n")) {
+      formatted_text->erase(0, 2);
+    } else if (formatted_text->starts_with('\n')) {
+      formatted_text->erase(0, 1);
+    }
   }
 
   // We don't have verification tests here as we only have a subset of code
@@ -1064,8 +1211,9 @@ std::ostream &ExecutionControl::Stream() const {
 }
 
 void Formatter::SelectLines(const LineNumberSet &lines) {
+  line_limited_ = !lines.empty();
   disabled_ranges_ = EnabledLinesToDisabledByteRanges(
-      lines, text_structure_.GetLineColumnMap());
+      lines, text_structure_.GetLineColumnMap(), text_structure_.Contents().size());
 }
 
 // Given control flags and syntax tree, selectively disable some ranges
@@ -1669,6 +1817,26 @@ Status Formatter::Format(const ExecutionControl &control) {
     }
   }
 
+  // When layout joins tokens into one excerpt, Emit() no longer handles the
+  // whitespace between them. Keep any such gap that overlaps a disabled
+  // line, including the newline before a selected line.
+  if (line_limited_) {
+    const ByteOffsetSet &disabled_ranges = disabled_ranges_;
+    for (auto &line : formatted_lines_) {
+      auto &tokens = line.MutableTokens();
+      for (size_t i = 1; i < tokens.size(); ++i) {
+        const int start = tokens[i - 1].token->right(full_text);
+        const int end = tokens[i].token->left(full_text);
+        const auto disabled = disabled_ranges.LowerBound(start);
+        if (start < end && disabled != disabled_ranges.end() &&
+            disabled->first < end) {
+          tokens[i].before.action = verible::SpacingDecision::kPreserve;
+          tokens[i].before.preserved_space_start = full_text.begin() + start;
+        }
+      }
+    }
+  }
+
   // svfmt: nothing may follow an EOL comment on its line; otherwise it
   // becomes comment text. Some layouts (e.g. comments between a case label
   // and its statement, merged by append-fitting) can still do that, as in
@@ -1680,7 +1848,7 @@ Status Formatter::Format(const ExecutionControl &control) {
       auto &before = tokens[i].before;
       if (before.action == verible::SpacingDecision::kWrap) continue;
       if (before.action == verible::SpacingDecision::kPreserve &&
-          tokens[i].OriginalLeadingSpaces().find('\n') != std::string_view::npos) {
+          tokens[i].OriginalLeadingSpaces().find_first_of("\r\n") != std::string_view::npos) {
         continue;
       }
       before.action = verible::SpacingDecision::kWrap;
@@ -1833,6 +2001,13 @@ void Formatter::Emit(bool include_disabled, std::ostream &stream) const {
   const verible::LineTerminatorStyle out_terminator =
       DetermineOutputLineTerminator(style_.line_terminator, full_text);
   int position = 0;  // tracks with the position in the original full_text
+  const verible::TokenInfo *previous_token = nullptr;
+  bool previous_closes_block = false;
+  const auto closes_block = [](const verible::FormattedToken &token) {
+    const auto kind = static_cast<verilog_tokentype>(token.token->token_enum());
+    return IsEndKeyword(kind) || kind == TK_join || kind == TK_join_any ||
+           kind == TK_join_none;
+  };
   for (const verible::FormattedExcerpt &line : formatted_lines_) {
     // TODO(fangism): The handling of preserved spaces before tokens is messy:
     // some of it is handled here, some of it is inside FormattedToken.
@@ -1842,36 +2017,63 @@ void Formatter::Emit(bool include_disabled, std::ostream &stream) const {
                               : line.Tokens().front().token->left(full_text);
     const std::string_view leading_whitespace(
         full_text.substr(position, front_offset - position));
-    FormatWhitespaceWithDisabledByteRanges(full_text, leading_whitespace,
-                                           disabled_ranges_, include_disabled,
-                                           stream, out_terminator);
+    // An inline semicolon after a closing keyword is a separate empty
+    // statement. Keep it on its original line when the formatter built a
+    // separate excerpt for it.
+    const bool attach_semicolon =
+        previous_closes_block && !line.Tokens().empty() &&
+        line.Tokens().front().token->token_enum() == ';' &&
+        leading_whitespace.find_first_of("\r\n") == std::string_view::npos &&
+        !disabled_ranges_.Contains(previous_token->left(full_text)) &&
+        !disabled_ranges_.Contains(front_offset);
+    if (!attach_semicolon) {
+      FormatWhitespaceWithDisabledByteRanges(full_text, leading_whitespace,
+                                             disabled_ranges_, include_disabled,
+                                             stream, out_terminator);
+    }
 
     // When front of first token is format-disabled, the previous call will
     // already cover the space up to the front token, in which case,
     // the left-indentation for this line should be suppressed to avoid
     // being printed twice.
     if (!line.Tokens().empty()) {
-      const bool indent = !disabled_ranges_.Contains(front_offset);
-      const auto shifted = indent ? ShiftedBlockComment(line, full_text) : std::nullopt;
+      const bool indent = !attach_semicolon && !disabled_ranges_.Contains(front_offset);
+      const auto disabled = disabled_ranges_.LowerBound(front_offset);
+      const bool front_fully_enabled =
+          disabled == disabled_ranges_.end() ||
+          disabled->first >= line.Tokens().front().token->right(full_text);
+      const auto shifted = indent && front_fully_enabled
+                               ? ShiftedBlockComment(line, full_text)
+                               : std::nullopt;
       if (shifted) {
         // The line starts with a multi-line block comment that moved: its
         // continuation lines move with it.
         std::ostringstream rendered;
-        line.FormattedText(rendered, indent, include_token_p);
+        line.FormattedText(rendered, indent, include_token_p, out_terminator);
         std::string text = rendered.str();
         const std::string_view comment = line.Tokens().front().token->text();
         const size_t at = text.find(comment);
         if (at != std::string::npos) text.replace(at, comment.size(), *shifted);
         stream << text;
       } else {
-        line.FormattedText(stream, indent, include_token_p);
+        line.FormattedText(stream, indent, include_token_p, out_terminator);
       }
-      position = line.Tokens().back().token->right(full_text);
+      const auto &tokens = line.Tokens();
+      previous_closes_block =
+          closes_block(tokens.back()) ||
+          (tokens.size() >= 3 && tokens[tokens.size() - 2].token->token_enum() == ':' &&
+           closes_block(tokens[tokens.size() - 3]));
+      previous_token = tokens.back().token;
+      position = previous_token->right(full_text);
     }
   }
 
   // Handle trailing spaces after last token.
   const std::string_view trailing_whitespace(full_text.substr(position));
+  if (line_limited_ && trailing_whitespace.empty() && position > 0 &&
+      disabled_ranges_.Contains(position - 1)) {
+    return;
+  }
   FormatWhitespaceWithDisabledByteRanges(full_text, trailing_whitespace,
                                          disabled_ranges_, include_disabled,
                                          stream, out_terminator);

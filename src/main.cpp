@@ -92,6 +92,8 @@ static std::string AbslUnparseFlag(LineRanges /* unused */) {
 
 // TODO(fangism): Provide -i alias, as it is canonical to many formatters
 ABSL_DECLARE_FLAG(int, indentation_spaces);  // basic-format-style-init.cc
+ABSL_DECLARE_FLAG(int, wrap_spaces);
+ABSL_DECLARE_FLAG(int, column_limit);
 
 ABSL_FLAG(bool, inplace, false,
           "If true, overwrite the input file on successful conditions.");
@@ -304,6 +306,26 @@ int main(int argc, char **argv) {
                                   " [options] <file> [<file...>]\n"
                                   "To pipe from stdin, use '-' as <file>.");
   const auto file_args = verible::InitCommandLine(usage, &argc, &argv);
+  if (absl::GetFlag(FLAGS_column_limit) <= 0) {
+    std::cerr << "--column_limit must be positive.\n";
+    return 1;
+  }
+  if (absl::GetFlag(FLAGS_indentation_spaces) < 0 ||
+      absl::GetFlag(FLAGS_wrap_spaces) < 0) {
+    std::cerr << "--indentation_spaces and --wrap_spaces must be nonnegative.\n";
+    return 1;
+  }
+  if (absl::GetFlag(FLAGS_show_largest_token_partitions) < 0) {
+    std::cerr << "--show_largest_token_partitions must be nonnegative.\n";
+    return 1;
+  }
+  if (absl::GetFlag(FLAGS_verify) &&
+      (absl::GetFlag(FLAGS_dump_cst) ||
+       absl::GetFlag(FLAGS_show_token_partition_tree) ||
+       absl::GetFlag(FLAGS_show_largest_token_partitions) > 0)) {
+    std::cerr << "--verify cannot be combined with diagnostic flags that stop formatting.\n";
+    return 1;
+  }
   svfmt::GlobalAnalyzerOptions().include_dirs = absl::GetFlag(FLAGS_incdir);
   svfmt::GlobalAnalyzerOptions().defines = absl::GetFlag(FLAGS_define);
   svfmt::GlobalAnalyzerOptions().tab_width = absl::GetFlag(FLAGS_indentation_spaces);
@@ -321,6 +343,10 @@ int main(int argc, char **argv) {
           LineRanges::values.end(), &std::cerr, '-')) {
     std::cerr << "Error parsing --lines." << std::endl;
     std::cerr << "Got: --lines=" << AbslUnparseFlag(LineRanges()) << std::endl;
+    return 1;
+  }
+  if (lines_to_format.Contains(0)) {
+    std::cerr << "--lines starts at line 1.\n";
     return 1;
   }
 
@@ -349,6 +375,10 @@ int main(int argc, char **argv) {
   for (const std::string_view filename :
        verible::make_range(file_args.begin() + 1, file_args.end())) {
     all_success &= formatOneFile(filename, lines_to_format, &any_changes);
+  }
+  if (!std::cout.flush()) {
+    std::cerr << "svfmt: error writing to stdout\n";
+    return 1;
   }
 
   int ret_val = 0;

@@ -162,7 +162,8 @@ std::string_view FormattedToken::OriginalLeadingSpaces() const {
                                     token->text().begin());
 }
 
-std::ostream &FormattedToken::FormattedText(std::ostream &stream) const {
+std::ostream &FormattedToken::FormattedText(std::ostream &stream,
+                                             LineTerminatorStyle terminator) const {
   switch (before.action) {
     case SpacingDecision::kPreserve: {
       if (before.preserved_space_start != string_view_null_iterator()) {
@@ -177,7 +178,7 @@ std::ostream &FormattedToken::FormattedText(std::ostream &stream) const {
     }
     case SpacingDecision::kWrap:
       // Never print spaces before a newline.
-      stream << '\n';
+      EmitLineTerminator(terminator, stream);
       ABSL_FALLTHROUGH_INTENDED;
     case SpacingDecision::kAlign:
     case SpacingDecision::kAppend:

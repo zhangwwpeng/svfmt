@@ -231,7 +231,8 @@ class FormattedExcerpt {
   std::ostream &FormattedText(
       std::ostream &, bool indent,
       const std::function<bool(const TokenInfo &)> &include_token_p =
-          [](const TokenInfo &) { return true; }) const;
+          [](const TokenInfo &) { return true; },
+      LineTerminatorStyle terminator = LineTerminatorStyle::kLF) const;
 
   // Returns formatted code as a string.
   std::string Render() const;

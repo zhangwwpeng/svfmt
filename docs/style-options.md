@@ -13,7 +13,7 @@ scripts and flagfiles keep working. Defaults below were taken from
 | `--wrap_spaces` | 4 | extra indentation for wrapped continuation lines |
 | `--line_break_penalty` | 2 | search cost per introduced line break |
 | `--over_column_limit_penalty` | 100 | base cost for exceeding the column limit (+1 per extra column) |
-| `--line_terminator` | auto | `auto`, `LF` or `CRLF` |
+| `--line_terminator` | auto | `auto`, `LF` or `CRLF` for formatted line breaks. Verbatim text keeps its original line endings. |
 
 ## Verilog style (`FormatStyle`)
 
@@ -60,7 +60,7 @@ Other options:
 
 | Flag | Meaning |
 | --- | --- |
-| `--inplace` | rewrite files in place |
+| `--inplace` | replace each changed file atomically. Files with multiple hard links are rejected. |
 | `--lines=N-M,...` | format only these line ranges |
 | `--stdin_name` | file name to use in diagnostics when reading `-` |
 | `--verify` | exit non-zero if the file would change (check mode) |

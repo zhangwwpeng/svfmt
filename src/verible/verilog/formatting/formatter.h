@@ -86,7 +86,7 @@ absl::Status FormatVerilog(const verible::TextStructureView &text_structure,
                            const verible::LineNumberSet &lines = {},
                            const ExecutionControl &control = {});
 
-// Format only lines in line_range interval [min, max) in "full_content"
+// Format only 1-based lines in line_range interval [min, max) in "full_content"
 // using "style". Emits _only_ the formatted code in the range
 // to "formatted_stream".
 // Used for interactive formatting, e.g. in editors and does not do convergence

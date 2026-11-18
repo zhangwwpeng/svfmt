@@ -16,6 +16,7 @@
 #define VERIBLE_COMMON_UTIL_INTERVAL_H_
 
 #include <iostream>
+#include <limits>
 #include <string_view>
 #include <utility>
 
@@ -129,6 +130,10 @@ bool ParseInclusiveRange(Interval<T> *interval, std::string_view first_str,
   }
   if (last < first) {
     std::swap(first, last);
+  }
+  if (last == std::numeric_limits<T>::max()) {
+    *errstream << "Range endpoint is too large: " << last << '\n';
+    return false;
   }
   *interval = {first, last + 1};  // convert inclusive range to half-open range
   return true;

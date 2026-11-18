@@ -295,8 +295,15 @@ const TextStructureView::LinesInfo &TextStructureView::LinesInfo::Get(
     std::string_view contents) {
   if (valid) return *this;
 
-  lines = absl::StrSplit(contents, '\n');
-  line_column_map.reset(new LineColumnMap(lines));
+  line_column_map = std::make_unique<LineColumnMap>(contents);
+  const auto &offsets = line_column_map->GetBeginningOfLineOffsets();
+  lines.clear();
+  lines.reserve(offsets.size());
+  for (size_t i = 1; i < offsets.size(); ++i) {
+    // Preserve the historical CRLF view, which excludes LF but retains CR.
+    lines.push_back(contents.substr(offsets[i - 1], offsets[i] - offsets[i - 1] - 1));
+  }
+  lines.push_back(contents.substr(offsets.back()));
   valid = true;
 
   return *this;

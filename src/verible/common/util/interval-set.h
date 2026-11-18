@@ -20,6 +20,7 @@
 #include <initializer_list>
 #include <iostream>
 #include <iterator>
+#include <limits>
 #include <map>
 #include <sstream>
 #include <string>
@@ -549,20 +550,28 @@ bool ParseInclusiveRanges(IntervalSet<T> *iset, Iter begin, Iter end,
       const auto &arg = bounds.front();
       // ignore blanks, which comes from splitting ""
       if (arg.empty()) continue;
-      int line_number;
+      T line_number;
       if (!absl::SimpleAtoi(arg, &line_number)) {
         *errstream << "Expected number, but got: \"" << arg << "\"."
                    << std::endl;
         return false;
       }
+      if (line_number == std::numeric_limits<T>::max()) {
+        *errstream << "Range endpoint is too large: " << line_number << '\n';
+        return false;
+      }
       iset->Add(line_number);
-    } else if (bounds.size() >= 2) {
+    } else if (bounds.size() == 2) {
       Interval<T> interval;
       if (!ParseInclusiveRange(&interval, bounds.front(), bounds.back(),
                                errstream)) {
         return false;
       }
       iset->Add(interval);
+    } else {
+      *errstream << "Expected a single number or a range, but got: \""
+                 << range << "\".\n";
+      return false;
     }
   }
   return true;

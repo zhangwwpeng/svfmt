@@ -37,7 +37,7 @@ verible::ByteOffsetSet DisableFormattingRanges(
 // Translates line numbers into a set of byte ranges to disable formatting.
 verible::ByteOffsetSet EnabledLinesToDisabledByteRanges(
     const verible::LineNumberSet &line_numbers,
-    const verible::LineColumnMap &line_column_map);
+    const verible::LineColumnMap &line_column_map, int text_size);
 
 // Formats space between tokens while honoring formatting-disabled ranges.
 // 'text_base' is the entire original text that was formatted.

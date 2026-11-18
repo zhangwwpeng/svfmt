@@ -88,6 +88,7 @@ absl::Status SetContents(std::string_view filename, std::string_view content);
 
 // Replace an existing file only after its complete new contents have been
 // written. Resolves symlinks so that a symlink passed as filename is retained.
+// Rejects files with multiple hard links.
 absl::Status ReplaceContentsAtomically(std::string_view filename,
                                        std::string_view content);
 

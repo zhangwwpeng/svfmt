@@ -15,6 +15,11 @@
 #include "verible/common/util/file-util.h"
 
 #include <fcntl.h>
+#ifdef __APPLE__
+#include <copyfile.h>
+#elif defined(__linux__)
+#include <sys/xattr.h>
+#endif
 
 #include <algorithm>
 #include <cerrno>
@@ -28,6 +33,7 @@
 #include <string_view>
 #include <system_error>
 #include <utility>
+#include <vector>
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -270,6 +276,33 @@ absl::Status SetContents(std::string_view filename, std::string_view content) {
   return absl::OkStatus();
 }
 
+#ifdef __APPLE__
+static bool CopyExtendedAttributes(const char *source, const char *destination) {
+  return copyfile(source, destination, nullptr, COPYFILE_XATTR | COPYFILE_ACL) == 0;
+}
+#elif defined(__linux__)
+static bool CopyExtendedAttributes(const char *source, const char *destination) {
+  ssize_t size = listxattr(source, nullptr, 0);
+  if (size <= 0) return size == 0 || errno == ENOTSUP;
+  std::vector<char> names(size);
+  size = listxattr(source, names.data(), names.size());
+  if (size < 0) return false;
+  for (const char *name = names.data(); name < names.data() + size;
+       name += std::strlen(name) + 1) {
+    const ssize_t length = getxattr(source, name, nullptr, 0);
+    if (length < 0) return false;
+    // Keep a nonempty buffer even for zero-byte attributes so a concurrent
+    // change cannot turn the read into another size query.
+    std::vector<char> value(std::max<ssize_t>(length, 1));
+    const ssize_t read = getxattr(source, name, value.data(), value.size());
+    if (read < 0 || setxattr(destination, name, value.data(), read, 0) != 0) {
+      return false;
+    }
+  }
+  return true;
+}
+#endif
+
 absl::Status ReplaceContentsAtomically(std::string_view filename,
                                        std::string_view content) {
   std::error_code error;
@@ -277,8 +310,18 @@ absl::Status ReplaceContentsAtomically(std::string_view filename,
   // resolved file, rather than replacing the symlink itself.
   const fs::path target = fs::canonical(std::string(filename), error);
   if (error) return CreateErrorStatusFromErr(filename, error, "can't resolve file");
-  const auto permissions = fs::status(target, error).permissions();
+  const auto target_status = fs::status(target, error);
   if (error) return CreateErrorStatusFromErr(filename, error, "can't stat file");
+  if (!fs::is_regular_file(target_status)) {
+    return absl::InvalidArgumentError(
+        absl::StrCat(filename, ": in-place formatting requires a regular file"));
+  }
+  const auto link_count = fs::hard_link_count(target, error);
+  if (error) return CreateErrorStatusFromErr(filename, error, "can't count hard links");
+  if (link_count != 1) {
+    return absl::FailedPreconditionError(
+        absl::StrCat(filename, ": refusing to replace a file with multiple hard links"));
+  }
   // Replacing a file only requires write access to its directory on POSIX.
   // Match the old fopen("wb") behavior for a read-only target.
   const int writability_probe =
@@ -294,7 +337,7 @@ absl::Status ReplaceContentsAtomically(std::string_view filename,
   close(writability_probe);
 #endif
 
-  std::string temporary = target.string() + ".svfmt-XXXXXX";
+  std::string temporary = (target.parent_path() / ".svfmt-XXXXXX").string();
   int fd;
 #ifdef _WIN32
   if (_mktemp_s(temporary.data(), temporary.size() + 1) != 0) {
@@ -313,12 +356,12 @@ absl::Status ReplaceContentsAtomically(std::string_view filename,
   FILE *out = fdopen(fd, "wb");
 #endif
   if (!out) {
+    const int open_error = errno;
 #ifdef _WIN32
     _close(fd);
 #else
     close(fd);
 #endif
-    const int open_error = errno;
     fs::remove(temporary, error);
     return CreateErrorStatusFromSysError(filename, open_error, "can't open temporary file");
   }
@@ -339,7 +382,14 @@ absl::Status ReplaceContentsAtomically(std::string_view filename,
     return CreateErrorStatusFromSysError(filename, close_error, "can't close temporary file");
   }
 
-  fs::permissions(temporary, permissions, fs::perm_options::replace, error);
+  fs::permissions(temporary, target_status.permissions(), fs::perm_options::replace, error);
+#if defined(__APPLE__) || defined(__linux__)
+  if (!error && !CopyExtendedAttributes(target.c_str(), temporary.c_str())) {
+    const auto status = CreateErrorStatusFromErrno(filename, "can't copy file metadata");
+    fs::remove(temporary, error);
+    return status;
+  }
+#endif
   if (!error) fs::rename(temporary, target, error);
   if (error) {
     const auto status = CreateErrorStatusFromErr(filename, error, "can't replace file");

@@ -56,16 +56,18 @@ std::ostream &operator<<(std::ostream &out, const LineColumnRange &r) {
 // Offsets are guaranteed to be monotonically increasing (sorted), and
 // thus, are binary-searchable.
 LineColumnMap::LineColumnMap(std::string_view text) {
-  // The column number after every line break is 0.
+  // The column number after every LF, CRLF or CR line break is 0.
   // The first line always starts at offset 0.
   beginning_of_line_offsets_.push_back(0);
-  auto offset = text.find('\n');
+  auto offset = text.find_first_of("\r\n");
   while (offset != std::string_view::npos) {
+    if (text[offset] == '\r' && offset + 1 < text.size() && text[offset + 1] == '\n') {
+      ++offset;
+    }
     beginning_of_line_offsets_.push_back(offset + 1);
-    offset = text.find('\n', offset + 1);
+    offset = text.find_first_of("\r\n", offset + 1);
   }
-  // If the text does not end with a \n (POSIX), don't implicitly behave as if
-  // there were one.
+  // A final partial line does not get an implicit line break.
 }
 
 // Constructor that calculates line break offsets given an already-split

@@ -972,7 +972,9 @@ enum class AlignableSyntaxSubtype {
   kPortDeclaration,
   kStructUnionMember,
   kDataDeclaration,  // net/variable declarations
+  kAttributedDataDeclaration,
   kClassMemberVariables,
+  kAttributedClassMemberVariables,
   kCaseLikeItems,
   kContinuousAssignment,
   kEnumListAssignment,  // Constants aligned in enums.
@@ -980,6 +982,17 @@ enum class AlignableSyntaxSubtype {
   kNonBlockingAssignment,
   kDistItem,  // Distribution items.
 };
+
+// Align attributed declarations together so their prefixes do not push
+// ordinary declarations away from the block's indentation.
+static bool HasLeadingAttribute(const TokenPartitionTree &partition) {
+  const auto tokens = partition.Value().TokensRange();
+  const auto first = std::find_if(tokens.begin(), tokens.end(),
+                                 [](const PreFormatToken &token) {
+    return !IsComment(static_cast<verilog_tokentype>(token.TokenEnum()));
+  });
+  return first != tokens.end() && first->TokenEnum() == TK_ATTRIBUTE;
+}
 
 static AlignedPartitionClassification AlignClassify(
     AlignmentGroupAction match,
@@ -1048,7 +1061,9 @@ static std::vector<TaggedTokenPartitionRange> GetConsecutiveModuleItemGroups(
         // Align net/variable declarations.
         if (IsAlignableDeclaration(node)) {
           return AlignClassify(AlignmentGroupAction::kMatch,
-                               AlignableSyntaxSubtype::kDataDeclaration);
+                               HasLeadingAttribute(partition)
+                                   ? AlignableSyntaxSubtype::kAttributedDataDeclaration
+                                   : AlignableSyntaxSubtype::kDataDeclaration);
         }
         // svfmt: non-ANSI port declarations ("output [7:0] q;") with one name.
         if (node.MatchesTag(SyntaxKind::PortDeclaration) &&
@@ -1093,7 +1108,9 @@ static std::vector<TaggedTokenPartitionRange> GetConsecutiveClassItemGroups(
         return AlignClassify(IsAlignableDeclaration(node)
                                  ? AlignmentGroupAction::kMatch
                                  : AlignmentGroupAction::kNoMatch,
-                             AlignableSyntaxSubtype::kClassMemberVariables);
+                             HasLeadingAttribute(partition)
+                                 ? AlignableSyntaxSubtype::kAttributedClassMemberVariables
+                                 : AlignableSyntaxSubtype::kClassMemberVariables);
       });
 }
 
@@ -1123,7 +1140,9 @@ static std::vector<TaggedTokenPartitionRange> GetAlignableStatementGroups(
         // Align local variable declarations.
         if (IsAlignableDeclaration(node)) {
           return AlignClassify(AlignmentGroupAction::kMatch,
-                               AlignableSyntaxSubtype::kDataDeclaration);
+                               HasLeadingAttribute(partition)
+                                   ? AlignableSyntaxSubtype::kAttributedDataDeclaration
+                                   : AlignableSyntaxSubtype::kDataDeclaration);
         }
         // Align blocking assignments.
         const SyntaxTreeNode *expr =
@@ -1325,10 +1344,16 @@ static std::vector<AlignablePartitionGroup> ExtractAlignablePartitionGroups(
     // Use the alignment scanner and policy that correspond to the
     // match_subtype.  This supports aligning a heterogenous collection of
     // alignable partition groups from the same parent partition (full_range).
+    auto subtype = static_cast<AlignableSyntaxSubtype>(range.match_subtype);
+    if (subtype == AlignableSyntaxSubtype::kAttributedDataDeclaration) {
+      subtype = AlignableSyntaxSubtype::kDataDeclaration;
+    } else if (subtype == AlignableSyntaxSubtype::kAttributedClassMemberVariables) {
+      subtype = AlignableSyntaxSubtype::kClassMemberVariables;
+    }
     groups.emplace_back(
         FilterAlignablePartitions(range.range, ignore_group_predicate),
-        AlignmentColumnScannerSelector(vstyle, range.match_subtype),
-        AlignmentPolicySelector(vstyle, range.match_subtype));
+        AlignmentColumnScannerSelector(vstyle, static_cast<int>(subtype)),
+        AlignmentPolicySelector(vstyle, static_cast<int>(subtype)));
     if (groups.back().IsEmpty()) groups.pop_back();
   }
   return groups;

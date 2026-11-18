@@ -20,6 +20,8 @@
 #include <string_view>
 
 namespace verible {
+inline constexpr std::string_view kUtf8Bom = "\xef\xbb\xbf";
+
 // Determine length in characters of an UTF8-encoded string.
 inline int utf8_len(std::string_view str) {
   return std::count_if(str.begin(), str.end(),

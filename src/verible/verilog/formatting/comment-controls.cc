@@ -70,12 +70,15 @@ ByteOffsetSet DisableFormattingRanges(std::string_view text,
             if (begin_disable_offset == kNullOffset) {
               begin_disable_offset = token.right(text);
               if (vtoken_enum == TK_EOL_COMMENT) {
-                // to cover the trailing '\n' (svfmt: or "\r\n")
+                // Skip the directive's own LF, CRLF or CR terminator.
                 if (begin_disable_offset < static_cast<int>(text.size()) &&
                     text[begin_disable_offset] == '\r') {
                   ++begin_disable_offset;
                 }
-                ++begin_disable_offset;
+                if (begin_disable_offset < static_cast<int>(text.size()) &&
+                    text[begin_disable_offset] == '\n') {
+                  ++begin_disable_offset;
+                }
               }
             }  // else ignore
           } else if (comment_tokens.front() == "on") {
@@ -102,25 +105,30 @@ ByteOffsetSet DisableFormattingRanges(std::string_view text,
 
 ByteOffsetSet EnabledLinesToDisabledByteRanges(
     const verible::LineNumberSet &line_numbers,
-    const verible::LineColumnMap &line_column_map) {
+    const verible::LineColumnMap &line_column_map, int text_size) {
   // Interpret empty line numbers as enabling all lines for formatting.
   if (line_numbers.empty()) return ByteOffsetSet();
-  // Translate lines to byte offsets (strictly monotonic).
-  const int max_line = line_column_map.GetBeginningOfLineOffsets().size() + 1;
+  // Translate lines to byte offsets, clamping out-of-range lines to EOF.
+  const auto &offsets = line_column_map.GetBeginningOfLineOffsets();
   ByteOffsetSet byte_offsets(
       line_numbers.MonotonicTransform<int>([&](int line_number) {
         // line_numbers are 1-based, while OffsetAtLine is 0-based
-        const int n = std::max(std::min(line_number, max_line), 1);
-        return line_column_map.OffsetAtLine(n - 1);
+        const size_t index = std::max(line_number, 1) - 1;
+        return index < offsets.size() ? offsets[index] : text_size;
       }));
   // Invert set to get disabled ranges.
-  const int end_byte = line_column_map.LastLineOffset();
-  byte_offsets.Complement({0, end_byte});
+  byte_offsets.Complement({0, text_size});
   return byte_offsets;
 }
 
 static size_t NewlineCount(std::string_view s) {
-  return std::count(s.begin(), s.end(), '\n');
+  size_t count = 0;
+  for (size_t i = 0; i < s.size(); ++i) {
+    if (s[i] == '\n' || (s[i] == '\r' && (i + 1 == s.size() || s[i + 1] != '\n'))) {
+      ++count;
+    }
+  }
+  return count;
 }
 
 void FormatWhitespaceWithDisabledByteRanges(
@@ -137,11 +145,26 @@ void FormatWhitespaceWithDisabledByteRanges(
   VLOG(3) << "disabled ranges: " << disabled_ranges;
   VLOG(3) << "enabled ranges: " << enabled_ranges;
 
+  bool ends_in_cr = include_disabled_ranges && start > 0 &&
+                    text_base[start - 1] == '\r' && disabled_ranges.Contains(start - 1);
+  const auto emit_newline = [&] {
+    // An LF after a byte-preserved CR would combine two logical line breaks.
+    const auto terminator = ends_in_cr ? verible::LineTerminatorStyle::kCRLF
+                                      : line_terminator_style;
+    verible::EmitLineTerminator(terminator, stream);
+    ends_in_cr = false;
+  };
+  const auto emit_preserved = [&](std::string_view text) {
+    if (text.empty()) return;
+    stream << text;
+    ends_in_cr = text.back() == '\r';
+  };
+
   // Special case if space_text is empty.
   if (space_text.empty() && start != 0) {
     if (!disabled_ranges.Contains(start)) {
       VLOG(3) << "output: 1*\"\\n\" (empty space text)";
-      verible::EmitLineTerminator(line_terminator_style, stream);
+      emit_newline();
       return;
     }
   }
@@ -156,7 +179,7 @@ void FormatWhitespaceWithDisabledByteRanges(
       const std::string_view disabled(
           text_base.substr(next_start, range.first - next_start));
       VLOG(3) << "output: \"" << EscapeString{disabled} << "\" (preserved)";
-      stream << disabled;
+      emit_preserved(disabled);
       total_enabled_newlines += NewlineCount(disabled);
     }
     {  // for enabled intervals, preserve only newlines
@@ -165,7 +188,7 @@ void FormatWhitespaceWithDisabledByteRanges(
       const size_t newline_count = NewlineCount(enabled);
       VLOG(3) << "output: " << newline_count << "*\"\\n\" (formatted)";
       for (size_t i = 0; i < newline_count; i++) {
-        verible::EmitLineTerminator(line_terminator_style, stream);
+        emit_newline();
       }
       partially_enabled = true;
       total_enabled_newlines += newline_count;
@@ -178,13 +201,13 @@ void FormatWhitespaceWithDisabledByteRanges(
         text_base.substr(next_start, end - next_start));
     VLOG(3) << "output: \"" << EscapeString(final_disabled)
             << "\" (remaining disabled)";
-    stream << final_disabled;
+    emit_preserved(final_disabled);
     total_enabled_newlines += NewlineCount(final_disabled);
   }
   // Print at least one newline if some subrange was format-enabled.
   if (partially_enabled && total_enabled_newlines == 0 && start != 0) {
     VLOG(3) << "output: 1*\"\\n\"";
-    verible::EmitLineTerminator(line_terminator_style, stream);
+    emit_newline();
   }
 }
 

@@ -119,7 +119,8 @@ FormattedExcerpt::FormattedExcerpt(const UnwrappedLine &uwline)
 
 std::ostream &FormattedExcerpt::FormattedText(
     std::ostream &stream, bool indent,
-    const std::function<bool(const TokenInfo &)> &include_token_p) const {
+    const std::function<bool(const TokenInfo &)> &include_token_p,
+    LineTerminatorStyle terminator) const {
   if (tokens_.empty()) return stream;
   // Let caller print the preceding/trailing newline.
   if (indent) {
@@ -141,7 +142,7 @@ std::ostream &FormattedExcerpt::FormattedText(
   }
   for (const auto &ftoken :
        verible::make_range(tokens_.begin() + 1, tokens_.end())) {
-    if (include_token_p(*ftoken.token)) stream << ftoken;
+    if (include_token_p(*ftoken.token)) ftoken.FormattedText(stream, terminator);
   }
   return stream;
 }

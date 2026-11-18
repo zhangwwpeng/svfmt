@@ -23,6 +23,7 @@
 
 #include "verible/common/strings/position.h"
 #include "verible/common/text/concrete-syntax-leaf.h"
+#include "verible/common/text/line-terminator.h"
 #include "verible/common/text/token-info.h"
 #include "verible/common/util/container-iterator-range.h"
 
@@ -230,7 +231,8 @@ struct FormattedToken {
   std::string_view OriginalLeadingSpaces() const;
 
   // Print out formatted result after formatting decision optimization.
-  std::ostream &FormattedText(std::ostream &) const;
+  std::ostream &FormattedText(
+      std::ostream &, LineTerminatorStyle terminator = LineTerminatorStyle::kLF) const;
 
   // The token this PreFormatToken holds. TokenInfo must outlive this object.
   const TokenInfo *token = nullptr;

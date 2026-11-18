@@ -966,6 +966,15 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
       Context().empty() ||
       DirectParentTag(Context()) == static_cast<int>(GroupKind::kMacroArgList);
 
+  // A directive immediately before the assertion expression has its own
+  // indentation. Start the expression at the assertion body's indentation.
+  if (DirectParentTag(Context()) == static_cast<int>(GroupKind::kAssertionDeclBody) &&
+      (kind == SyntaxKind::PropertySpec ||
+       slang::syntax::SequenceExprSyntax::isKind(kind))) {
+    VisitNewUnwrappedLine(node);
+    return;
+  }
+
   // Each element of an assignment pattern's list is its own section (Verible:
   // kExpression inside kAssignmentPattern), so that the list can wrap one
   // element per line.
@@ -1021,6 +1030,8 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
         return;
       }
 
+      case ListKind::PropertyDeclaration_variables:
+      case ListKind::SequenceDeclaration_variables:
       case ListKind::UdpBody_portDecls:
         VisitIndentedSection(node, 0, PartitionPolicyEnum::kAlwaysExpand);
         return;
@@ -1484,6 +1495,17 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
       VisitIndentedSection(node, 0, PartitionPolicyEnum::kAlwaysExpand);
       break;
     }
+
+    case SyntaxKind::LocalVariableDeclaration:
+      // Assertion locals are followed by the property/sequence expression.
+      // Keep each declaration separate without adding another indent level.
+      if (DirectParentTag(Context()) == Tag(ListKind::PropertyDeclaration_variables) ||
+          DirectParentTag(Context()) == Tag(ListKind::SequenceDeclaration_variables)) {
+        VisitNewUnwrappedLine(node);
+      } else {
+        TraverseChildren(node);
+      }
+      break;
 
     // For the following items, start a new unwrapped line only if they are
     // *direct* descendants of list elements.  This effectively suppresses
@@ -3847,6 +3869,13 @@ void TreeUnwrapper::Visit(const verible::SyntaxTreeLeaf &leaf) {
   } else if (IsEndKeyword(tag)) {
     VLOG(4) << "handling end* keyword";
     StartNewUnwrappedLine(PartitionPolicyEnum::kAlwaysExpand, &leaf);
+  } else if ((leaf.Tag().tag == '?' || leaf.Tag().tag == ':') &&
+             AncestorKind(Context()) == SyntaxKind::ConditionalExpression &&
+             CurrentUnwrappedLine().IsEmpty()) {
+    // A comment can split a ternary into separate partitions. Indent the
+    // leading operator as a continuation of the expression.
+    auto &line = CurrentUnwrappedLine();
+    line.SetIndentationSpaces(line.IndentationSpaces() + style_.wrap_spaces);
   }
 
   auto &partition = *ABSL_DIE_IF_NULL(CurrentTokenPartition());

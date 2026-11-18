@@ -36,10 +36,10 @@
 3. The external differential preprocessor tool masks macro-produced values
    because it compares files with different paths. The formatter itself
    compares active macro expansions under the same source name and checks
-   direct `` `__LINE__ `` locations across all branches. Indirect line-sensitive
-   macro uses in inactive branches under a different define set remain a
-   limitation. Mutation testing has run on a 500-file sample, not the full
-   corpus.
+   locations of `` `__LINE__ `` and aliases defined in the source across all
+   branches. Aliases from external definitions are only checked when they
+   expand in the active configuration. Mutation testing has run on a 500-file
+   sample, not the full corpus.
 
 ## Later
 
