@@ -24,9 +24,13 @@ original code is spaced.
 | Flag | Default |
 | --- | --- |
 | `--port_declarations_alignment` | infer |
+| `--module_port_align_commas` | false |
 | `--named_port_alignment` | infer |
+| `--named_port_align_closing_parentheses` | false |
 | `--named_parameter_alignment` | infer |
+| `--named_parameter_align_closing_parentheses` | false |
 | `--formal_parameters_alignment` | infer |
+| `--module_parameter_align_commas` | false |
 | `--module_net_variable_alignment` | infer |
 | `--assignment_statement_alignment` | infer |
 | `--enum_assignment_statement_alignment` | infer |
@@ -53,6 +57,8 @@ Other options:
 | `--expand_coverpoints` | false | always put each coverpoint item on its own line |
 | `--port_declarations_right_align_packed_dimensions` | false | right-align packed dimensions in aligned port lists |
 | `--port_declarations_right_align_unpacked_dimensions` | false | same, for unpacked dimensions |
+| `--max_dimension_padding` | -1 | maximum alignment spaces after `[` in declarations; negative values allow unlimited padding |
+| `--named_connection_min_spacing` | 0 | minimum spaces before `(` in aligned named parameters and ports |
 | `--try_wrap_long_lines` | false | run the line-wrap optimizer; otherwise long lines are left unformatted |
 | `--wrap_end_else_clauses` | false | put `end` and `else` on separate lines |
 

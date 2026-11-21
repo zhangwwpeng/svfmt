@@ -66,6 +66,9 @@ struct FormatStyle : public verible::BasicFormatStyle {
   // formatted.  Internal tests assume these are forced to kAlign.
   AlignmentPolicy port_declarations_alignment = AlignmentPolicy::kAlign;
 
+  // Align existing commas in ANSI module port declarations.
+  bool module_port_align_commas = false;
+
   // Control how struct and union members are formatted.
   AlignmentPolicy struct_union_members_alignment = AlignmentPolicy::kAlign;
 
@@ -76,12 +79,21 @@ struct FormatStyle : public verible::BasicFormatStyle {
   // For internal testing purposes, this is default to kAlign.
   AlignmentPolicy named_parameter_alignment = AlignmentPolicy::kAlign;
 
+  // Include the closing parenthesis when aligning named parameter assignments.
+  bool named_parameter_align_closing_parentheses = false;
+
   // Control indentation amount for named port connections.
   IndentationStyle named_port_indentation = IndentationStyle::kWrap;
 
   // Control how named ports (e.g. in module instances) are formatted.
   // Internal tests assume these are forced to kAlign.
   AlignmentPolicy named_port_alignment = AlignmentPolicy::kAlign;
+
+  // Include the closing parenthesis when aligning named port connections.
+  bool named_port_align_closing_parentheses = false;
+
+  // Minimum spacing before '(' in aligned named parameters and ports.
+  int named_connection_min_spacing = 0;
 
   // Control how module-local net/variable declarations are formatted.
   // Applies in module, generate, interface, and package bodies.
@@ -108,6 +120,9 @@ struct FormatStyle : public verible::BasicFormatStyle {
   // Internal tests assume these are forced to kAlign.
   AlignmentPolicy formal_parameters_alignment = AlignmentPolicy::kAlign;
 
+  // Align existing commas in module header parameter declarations.
+  bool module_parameter_align_commas = false;
+
   // Control how parameter/localparam declarations are formatted.
   // Applies in module, generate, interface, and package bodies.
   // Class body parameter declarations are not affected.
@@ -129,6 +144,7 @@ struct FormatStyle : public verible::BasicFormatStyle {
 
   bool port_declarations_right_align_packed_dimensions = false;
   bool port_declarations_right_align_unpacked_dimensions = false;
+  int max_dimension_padding = -1;
 
   // Control what breaks alignment groups for module items, statements,
   // and class items.

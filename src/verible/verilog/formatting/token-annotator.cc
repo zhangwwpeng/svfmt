@@ -1222,6 +1222,9 @@ static WithReason<SpacingOptions> BreakDecisionBetween(
   }
 
   if (right.TokenEnum() == TK_else) {
+    if (DirectParentIs(right_context, SyntaxKind::ElsePropertyClause)) {
+      return {SpacingOptions::kUndecided, "Property 'else' may stay on the line."};
+    }
     // TODO(fangism): feels like this should be the responsibility of
     // tree_unwrapper, handled by kElseClause, kGenerateElseClause, etc.
     if (left.TokenEnum() == TK_end && !style.wrap_end_else_clauses) {

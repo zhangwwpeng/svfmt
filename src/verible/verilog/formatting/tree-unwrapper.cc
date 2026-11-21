@@ -819,6 +819,16 @@ void TreeUnwrapper::LookAheadBeyondCurrentNode() {
   VLOG(4) << "end of " << __FUNCTION__;
 }
 
+// Single-argument calls in property expressions participate in wrapping the
+// expression as a whole.
+static bool IsSingleArgumentInPropertyDeclaration(
+    const SyntaxTreeNode &arguments,
+    const verible::SyntaxTreeContext &context) {
+  return arguments.size() == 1 &&
+         svfmt::IsInside(context, SyntaxKind::PropertySpec) &&
+         svfmt::IsInside(context, SyntaxKind::PropertyDeclaration);
+}
+
 // This hook is called between the children nodes of the handled node types.
 // This is what allows partitions containing only comments to be properly
 // indented to the same level that non-comment sub-partitions would.
@@ -851,6 +861,8 @@ void TreeUnwrapper::InterChildNodeHook(const SyntaxTreeNode &node) {
       LookAheadBeyondCurrentNode();
       break;
     case static_cast<int>(ListKind::ArgumentList_parameters):
+      if (IsSingleArgumentInPropertyDeclaration(node, Context())) break;
+      [[fallthrough]];
     case static_cast<int>(GroupKind::kMacroArgList):
       // Put each argument, separator, and comment in a new unwrapped line
       StartNewUnwrappedLine(PartitionPolicyEnum::kFitOnLineElseExpand, &node);
@@ -971,7 +983,13 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
   if (DirectParentTag(Context()) == static_cast<int>(GroupKind::kAssertionDeclBody) &&
       (kind == SyntaxKind::PropertySpec ||
        slang::syntax::SequenceExprSyntax::isKind(kind))) {
-    VisitNewUnwrappedLine(node);
+    if (kind == SyntaxKind::PropertySpec) {
+      // Let the line-wrap search choose expression breaks.
+      StartNewUnwrappedLine(PartitionPolicyEnum::kUninitialized, &node);
+      TraverseChildren(node);
+    } else {
+      VisitNewUnwrappedLine(node);
+    }
     return;
   }
 
@@ -1185,7 +1203,8 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
         }
         // svfmt: a call in declared dimensions ("[$clog2(W)-1:0]") stays
         // on the line of its declaration.
-        if (svfmt::IsInside(Context(), SyntaxKind::VariableDimension)) break;
+        if (svfmt::IsInside(Context(), SyntaxKind::VariableDimension) ||
+            IsSingleArgumentInPropertyDeclaration(node, Context())) break;
         // svfmt: also "$error(...)" as a module / generate item, and "new(...)".
         if (AncestorKind(Context()) == SyntaxKind::ArgumentList &&
             (AncestorKind(Context(), 1) == SyntaxKind::InvocationExpression ||

@@ -96,15 +96,23 @@ ABSL_FLAG(IndentationStyle, named_port_indentation, IndentationStyle::kWrap,
 ABSL_FLAG(AlignmentPolicy, port_declarations_alignment,
           AlignmentPolicy::kInferUserIntent,
           "Format port declarations: {align,flush-left,preserve,infer}");
+ABSL_FLAG(bool, module_port_align_commas, false,
+          "Align commas in aligned ANSI module port declarations.");
 ABSL_FLAG(AlignmentPolicy, struct_union_members_alignment,
           AlignmentPolicy::kInferUserIntent,
           "Format struct/union members: {align,flush-left,preserve,infer}");
 ABSL_FLAG(AlignmentPolicy, named_parameter_alignment,
           AlignmentPolicy::kInferUserIntent,
           "Format named actual parameters: {align,flush-left,preserve,infer}");
+ABSL_FLAG(bool, named_parameter_align_closing_parentheses, false,
+          "Also align closing parentheses of aligned named actual parameters.");
 ABSL_FLAG(AlignmentPolicy, named_port_alignment,
           AlignmentPolicy::kInferUserIntent,
           "Format named port connections: {align,flush-left,preserve,infer}");
+ABSL_FLAG(bool, named_port_align_closing_parentheses, false,
+          "Also align closing parentheses of aligned named port connections.");
+ABSL_FLAG(int, named_connection_min_spacing, 0,
+          "Minimum spacing before '(' in aligned named parameters and ports.");
 ABSL_FLAG(AlignmentPolicy, module_net_variable_alignment,
           AlignmentPolicy::kInferUserIntent,
           "Format net/variable declarations in module, generate, "
@@ -113,6 +121,8 @@ ABSL_FLAG(AlignmentPolicy, formal_parameters_alignment,
           AlignmentPolicy::kInferUserIntent,
           "Format formal parameters in module/interface/class headers "
           "(inside #(...)): {align,flush-left,preserve,infer}");
+ABSL_FLAG(bool, module_parameter_align_commas, false,
+          "Align commas in aligned module header parameter declarations.");
 ABSL_FLAG(AlignmentPolicy, parameter_declaration_alignment,
           AlignmentPolicy::kInferUserIntent,
           "Format parameter/localparam declarations in module, generate, "
@@ -164,6 +174,10 @@ ABSL_FLAG(bool, port_declarations_right_align_unpacked_dimensions, false,
           "If true, unpacked dimensions in contexts with enabled alignment are "
           "aligned to the right.");
 
+ABSL_FLAG(int, max_dimension_padding, -1,
+          "Maximum alignment spaces after '[' in declarations. "
+          "A negative value leaves the padding unlimited.");
+
 // -- Deprecated flags. These were typos. Remove after 2022-01-01
 ABSL_RETIRED_FLAG(
     AlignmentPolicy, net_variable_alignment,  //
@@ -185,22 +199,28 @@ void InitializeFromFlags(FormatStyle *style) {
   // In the same sequence as declared in struct FormatStyle
   STYLE_FROM_FLAG(port_declarations_indentation);
   STYLE_FROM_FLAG(port_declarations_alignment);
+  STYLE_FROM_FLAG(module_port_align_commas);
   STYLE_FROM_FLAG(struct_union_members_alignment);
   STYLE_FROM_FLAG(named_parameter_indentation);
   STYLE_FROM_FLAG(named_parameter_alignment);
+  STYLE_FROM_FLAG(named_parameter_align_closing_parentheses);
   STYLE_FROM_FLAG(named_port_indentation);
   STYLE_FROM_FLAG(named_port_alignment);
+  STYLE_FROM_FLAG(named_port_align_closing_parentheses);
+  STYLE_FROM_FLAG(named_connection_min_spacing);
   STYLE_FROM_FLAG(module_net_variable_alignment);
   STYLE_FROM_FLAG(assignment_statement_alignment);
   STYLE_FROM_FLAG(enum_assignment_statement_alignment);
   STYLE_FROM_FLAG(formal_parameters_indentation);
   STYLE_FROM_FLAG(formal_parameters_alignment);
+  STYLE_FROM_FLAG(module_parameter_align_commas);
   STYLE_FROM_FLAG(parameter_declaration_alignment);
   STYLE_FROM_FLAG(class_member_variable_alignment);
   STYLE_FROM_FLAG(case_items_alignment);
   STYLE_FROM_FLAG(distribution_items_alignment);
   STYLE_FROM_FLAG(port_declarations_right_align_packed_dimensions);
   STYLE_FROM_FLAG(port_declarations_right_align_unpacked_dimensions);
+  STYLE_FROM_FLAG(max_dimension_padding);
   STYLE_FROM_FLAG(try_wrap_long_lines);
   STYLE_FROM_FLAG(expand_coverpoints);
   STYLE_FROM_FLAG(compact_indexing_and_selections);

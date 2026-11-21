@@ -50,6 +50,9 @@ struct AlignmentColumnProperties {
 
   bool contains_delimiter = false;
 
+  // Move excess leading alignment spaces to the preceding adjacent cell.
+  int max_leading_spaces = -1;
+
   // svfmt: a top-level column that is dropped unless at least two rows of the
   // group have it (e.g. trailing comments: a lone comment is not pushed to
   // the end of the widest row).
@@ -279,7 +282,7 @@ class AlignablePartitionGroup {
 
   // This executes alignment, depending on the alignment_policy.
   // 'column_limit' is the maximum text width allowed post-alignment.
-  void Align(int column_limit) const;
+  void Align(int column_limit, bool align_overlong_rows = false) const;
 
  private:
   struct GroupAlignmentData;
@@ -553,7 +556,7 @@ void TabularAlignTokens(
     int column_limit, std::string_view full_text,
     const ByteOffsetSet &disabled_byte_ranges,
     const ExtractAlignmentGroupsFunction &extract_alignment_groups,
-    TokenPartitionTree *partition_ptr);
+    TokenPartitionTree *partition_ptr, bool align_overlong_rows = false);
 
 }  // namespace verible
 

@@ -770,6 +770,12 @@ static void ComputeAlignedRowCellSpacings(
       } else {  // flush right
         left_spacing = *accrued_spaces + padding;
         *accrued_spaces = 0;
+        const int limit = column_properties_it->Value().max_leading_spaces;
+        if (limit >= 0 && left_spacing > limit && !align_actions->empty() &&
+            align_actions->back().ftoken + 1 == ftoken) {
+          align_actions->back().new_before_spacing += left_spacing - limit;
+          left_spacing = limit;
+        }
       }
       align_actions->emplace_back(ftoken, left_spacing);
 
@@ -1304,9 +1310,22 @@ void FormatUsingOriginalSpacing(TokenPartitionRange partition_range) {
   }
 }
 
-void AlignablePartitionGroup::Align(int column_limit) const {
+void AlignablePartitionGroup::Align(int column_limit,
+                                    bool align_overlong_rows) const {
   // Compute dry-run of alignment spacings if it is needed.
   AlignmentPolicy policy = alignment_policy_;
+  // An already overlong row can share the group's alignment when wrapping is
+  // disabled. Keep the usual limit for groups that fit without padding.
+  if (align_overlong_rows && policy == AlignmentPolicy::kAlign &&
+      std::any_of(alignable_rows_.begin(), alignable_rows_.end(),
+                  [column_limit](const auto &row) {
+                    const auto &line = row->Value();
+                    return line.IndentationSpaces() +
+                               EffectiveCellWidth(line.TokensRange()) >
+                           column_limit;
+                  })) {
+    column_limit = std::numeric_limits<int>::max();
+  }
   VLOG(2) << "AlignmentPolicy: " << policy;
   GroupAlignmentData align_data;
   switch (policy) {
@@ -1354,7 +1373,7 @@ void TabularAlignTokens(
     int column_limit, std::string_view full_text,
     const ByteOffsetSet &disabled_byte_ranges,
     const ExtractAlignmentGroupsFunction &extract_alignment_groups,
-    TokenPartitionTree *partition_ptr) {
+    TokenPartitionTree *partition_ptr, bool align_overlong_rows) {
   VLOG(1) << __FUNCTION__;
   // Each subpartition is presumed to correspond to a list element or
   // possibly some other ignored element like comments.
@@ -1389,7 +1408,7 @@ void TabularAlignTokens(
     }
 
     // Calculate alignment and possibly apply it depending on alignment policy.
-    alignment_group.Align(column_limit);
+    alignment_group.Align(column_limit, align_overlong_rows);
   }
   VLOG(1) << "end of " << __FUNCTION__;
 }

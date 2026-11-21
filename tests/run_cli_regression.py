@@ -518,6 +518,165 @@ for source, flags, expected in (
     result = format_stdin(source, *flags)
     assert result.returncode == 0 and result.stdout == expected, result
 
+# One long default value must not cancel alignment of the parameter list.
+parameter_list = (
+    b"module eth_mac_10g_fifo #(\n"
+    b"    parameter DATA_WIDTH = 64,\n"
+    b"    parameter TX_PTP_TS_CTRL_IN_TUSER = 0,\n"
+    b"    parameter TX_USER_WIDTH = (PTP_TS_ENABLE ? (TX_PTP_TAG_ENABLE ? "
+    b"PTP_TAG_WIDTH : 0) + (TX_PTP_TS_CTRL_IN_TUSER ? 1 : 0) : 0) + 1,\n"
+    b"    parameter RX_USER_WIDTH = (PTP_TS_ENABLE ? PTP_TS_WIDTH : 0) + 1\n"
+    b") ();\n"
+    b"endmodule\n"
+)
+parameter_flags = ("--column_limit=120", "--indentation_spaces=4",
+                   "--formal_parameters_alignment=align")
+result = format_stdin(parameter_list, *parameter_flags)
+assert result.returncode == 0, result.stderr
+parameter_lines = [line for line in result.stdout.splitlines()
+                   if line.lstrip().startswith(b"parameter ")]
+assert len(parameter_lines) == 4, result.stdout
+assert {line.index(b"=") for line in parameter_lines} == {38}, result.stdout
+reformatted = format_stdin(result.stdout, *parameter_flags)
+assert reformatted.returncode == 0 and reformatted.stdout == result.stdout, reformatted
+
+# Comma alignment composes with equals alignment, including long defaults.
+parameter_comma_flags = (*parameter_flags, "--module_parameter_align_commas")
+result = format_stdin(parameter_list, *parameter_comma_flags)
+assert result.returncode == 0, result.stderr
+parameter_lines = [line for line in result.stdout.splitlines()
+                   if line.lstrip().startswith(b"parameter ")]
+assert len(parameter_lines) == 4, result.stdout
+assert {line.index(b"=") for line in parameter_lines} == {38}, result.stdout
+assert all(line.endswith(b",") for line in parameter_lines[:-1]), result.stdout
+assert len({len(line) for line in parameter_lines[:-1]}) == 1, result.stdout
+assert b"," not in parameter_lines[-1], result.stdout
+reformatted = format_stdin(result.stdout, *parameter_comma_flags)
+assert reformatted.returncode == 0 and reformatted.stdout == result.stdout, reformatted
+
+# Align the outer parentheses of named connections, including empty ports.
+named_ports = (
+    b"module m;\n"
+    b"  ptp_clock_cdc cdc (\n"
+    b"      .output_clk(rx_clk),\n"
+    b"      .sample_clk(ptp_sample_clk),\n"
+    b"      .input_ts(select_ts(ptp_ts_96)),\n"
+    b"      .locked()\n"
+    b"  );\n"
+    b"endmodule\n"
+)
+port_flags = ("--named_port_alignment=align",
+              "--named_port_align_closing_parentheses")
+result = format_stdin(named_ports, *port_flags)
+assert result.returncode == 0, result.stderr
+port_lines = [line for line in result.stdout.splitlines()
+              if line.lstrip().startswith(b".")]
+assert len(port_lines) == 4, result.stdout
+assert len({line.index(b"(") for line in port_lines}) == 1, result.stdout
+assert len({line.rindex(b")") for line in port_lines}) == 1, result.stdout
+reformatted = format_stdin(result.stdout, *port_flags)
+assert reformatted.returncode == 0 and reformatted.stdout == result.stdout, reformatted
+
+named_parameters = (
+    b"module m;\n"
+    b"  axis_async_fifo_adapter #(\n"
+    b"      .DEPTH(RX_FIFO_DEPTH),\n"
+    b"      .USER_BAD_FRAME_VALUE(1'b1),\n"
+    b"      .DROP_OVERSIZE_FRAME(RX_DROP_OVERSIZE_FRAME)\n"
+    b"  ) rx_fifo ();\n"
+    b"endmodule\n"
+)
+named_parameter_flags = ("--named_parameter_alignment=align",
+                         "--named_parameter_align_closing_parentheses")
+result = format_stdin(named_parameters, *named_parameter_flags)
+assert result.returncode == 0, result.stderr
+assert b"      .USER_BAD_FRAME_VALUE(1'b1                  ),\n" in result.stdout, result.stdout
+assert b"      .DROP_OVERSIZE_FRAME (RX_DROP_OVERSIZE_FRAME)\n" in result.stdout, result.stdout
+reformatted = format_stdin(result.stdout, *named_parameter_flags)
+assert reformatted.returncode == 0 and reformatted.stdout == result.stdout, reformatted
+
+for source, flags in ((named_ports, port_flags),
+                      (named_parameters, named_parameter_flags)):
+    flags = (*flags, "--named_connection_min_spacing=4")
+    result = format_stdin(source, *flags)
+    assert result.returncode == 0, result.stderr
+    connections = [line for line in result.stdout.splitlines()
+                   if line.lstrip().startswith(b".")]
+    name_columns = [line.split(b"(", 1)[0] for line in connections]
+    assert min(len(name) - len(name.rstrip(b" ")) for name in name_columns) == 4, result.stdout
+    assert len({len(name) for name in name_columns}) == 1, result.stdout
+    assert len({line.rindex(b")") for line in connections}) == 1, result.stdout
+    reformatted = format_stdin(result.stdout, *flags)
+    assert reformatted.returncode == 0 and reformatted.stdout == result.stdout, reformatted
+
+# Only ANSI module port lists align existing comma separators.
+port_list = (
+    b"    output wire [7:0] data, // payload\n"
+    b"    output wire valid_signal, // handshake\n"
+    b"    input wire ready\n"
+)
+port_declarations = (b"module m (\n" + port_list + b");\nendmodule\n"
+                     b"interface i (\n" + port_list + b");\nendinterface\n")
+declaration_flags = ("--indentation_spaces=4",
+                     "--port_declarations_indentation=indent",
+                     "--port_declarations_alignment=align")
+baseline = format_stdin(port_declarations, *declaration_flags)
+comma_flags = (*declaration_flags, "--module_port_align_commas")
+result = format_stdin(port_declarations, *comma_flags)
+assert baseline.returncode == 0 and result.returncode == 0, result.stderr
+module, interface = result.stdout.split(b"interface i (", 1)
+assert interface == baseline.stdout.split(b"interface i (", 1)[1], interface
+comma_columns = [line.index(b",") for line in module.splitlines() if b"," in line]
+assert len(comma_columns) == 2 and comma_columns[0] == comma_columns[1], module
+assert b"data        ," in module and b"ready\n);" in module, module
+reformatted = format_stdin(result.stdout, *comma_flags)
+assert reformatted.returncode == 0 and reformatted.stdout == result.stdout, reformatted
+
+# Limit padding inside dimensions while keeping their right edges aligned.
+dimension_source = (
+    b"module m;\n"
+    b"    wire [AXIS_DATA_WIDTH-1:0] m_axis_tdata;\n"
+    b"    wire [           7:0] m_axis_tid;\n"
+    b"    wire [           7:0] m_axis_tdest;\n"
+    b"endmodule\n"
+)
+dimension_flags = ("--indentation_spaces=4", "--module_net_variable_alignment=align",
+                   "--max_dimension_padding=3")
+result = format_stdin(dimension_source, *dimension_flags)
+assert result.returncode == 0, result.stderr
+dimension_lines = [line for line in result.stdout.splitlines() if b"wire " in line]
+assert len(dimension_lines) == 3, result.stdout
+assert all(b"[   7:0]" in line for line in dimension_lines[1:]), result.stdout
+assert len({line.index(b"]") for line in dimension_lines}) == 1, result.stdout
+reformatted = format_stdin(result.stdout, *dimension_flags)
+assert reformatted.returncode == 0 and reformatted.stdout == result.stdout, reformatted
+
+# Wrap a long property at operators while keeping its short calls intact.
+property_header = b"module m;\n    property signals_are_stable;\n"
+property_prefix = (
+    b"        @(posedge aclk) disable iff (!aresetn) "
+    b"(awvalid == 1 && awready == 0) |=>"
+)
+property_suffix = b"    endproperty : signals_are_stable\nendmodule\n"
+property_source = (
+    property_header + property_prefix +
+    b" ($stable(awid) && $stable(awaddr) && $stable(awlen) && "
+    b"$stable(awsize) && $stable(awburst) && $stable(awlock) && "
+    b"$stable(awcache) && $stable(awprot));\n" + property_suffix
+)
+property_expected = (
+    property_header + property_prefix + b"\n"
+    b"            ($stable(awid) && $stable(awaddr) && $stable(awlen) && "
+    b"$stable(awsize) && $stable(awburst) &&\n"
+    b"             $stable(awlock) && $stable(awcache) && $stable(awprot));\n" +
+    property_suffix
+)
+property_flags = ("--column_limit=120", "--indentation_spaces=4")
+result = format_stdin(property_source, *property_flags)
+assert result.returncode == 0 and result.stdout == property_expected, result
+reformatted = format_stdin(result.stdout, *property_flags)
+assert reformatted.returncode == 0 and reformatted.stdout == result.stdout, reformatted
+
 # Check an untouched comment ending in bare CR inside a formatted excerpt
 # that spans several lines of a parameter list.
 fixture = (golden_runner.parent / "inputs" / "param_macro_alignment.sv").read_bytes()
