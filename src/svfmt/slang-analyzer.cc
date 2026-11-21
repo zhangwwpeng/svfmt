@@ -2252,11 +2252,16 @@ std::string TabsToSpaces(std::string_view text, int width) {
       if (word == "define" || word == "pragma") {
         end = DefineEnd(text, j, /*comment_continues=*/true);
       } else if (!word.empty() && !IsDirectiveKeyword(word)) {
-        // The arguments may start on a later line ("`M" then "(a,\tb)").
+        // Whitespace and comments can separate the name from its arguments.
         size_t k = j;
-        while (k < n && (text[k] == ' ' || text[k] == '\t' || text[k] == '\n' ||
-                         text[k] == '\r')) {
-          ++k;
+        while (k < n) {
+          if (std::isspace(static_cast<unsigned char>(text[k]))) {
+            ++k;
+          } else if (text.substr(k, 2) == "//" || text.substr(k, 2) == "/*") {
+            k = CommentEnd(text, k);
+          } else {
+            break;
+          }
         }
         if (k < n && text[k] == '(') end = MacroArgsEnd(text, k);
       }

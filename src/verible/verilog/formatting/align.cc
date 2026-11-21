@@ -177,21 +177,14 @@ static bool PartitionHasLeadingTokensBeforeForcedWrap(
   return ftoken_it->before.break_decision == verible::SpacingOptions::kMustWrap;
 }
 
-// svfmt: the text of an inactive `ifdef branch is part of the directive.
-static bool StartsWithDirective(verible::FormatTokenRange range) {
-  const int e = range.front().TokenEnum();
-  return IsPreprocessorKeyword(verilog_tokentype(e)) || e == svfmt::TK_SVFMT_DISABLED_TEXT;
-}
-
-// svfmt: a row with a directive after its first token ("input [7:0]
-// `endif a,"): aligning puts the row on one line, after the directive.
+// A directive anywhere in a row makes the row unsuitable for alignment.
+// The text of an inactive conditional branch counts as part of a directive.
 static bool ContainsDirective(verible::FormatTokenRange range) {
-  if (range.empty()) return false;
   // Directives without a token kind of their own read as macro names.
   static constexpr std::string_view kLineDirectives[] = {
-      "`line", "`undefineall", "`resetall", "`celldefine", "`endcelldefine",
+      "`line", "`pragma", "`undefineall", "`resetall", "`celldefine", "`endcelldefine",
       "`unconnected_drive", "`nounconnected_drive", "`begin_keywords", "`end_keywords"};
-  return std::any_of(range.begin() + 1, range.end(), [](const PreFormatToken &t) {
+  return std::any_of(range.begin(), range.end(), [](const PreFormatToken &t) {
     const int e = t.TokenEnum();
     if (IsPreprocessorKeyword(verilog_tokentype(e)) || e == svfmt::TK_SVFMT_DISABLED_TEXT) {
       return true;
@@ -227,7 +220,7 @@ static bool IgnoreCommentsAndPreprocessingDirectives(
   if (HasStructUnionBody(partition)) return true;
 
   // ignore partitions belonging to preprocessing directives
-  return StartsWithDirective(token_range) || ContainsDirective(token_range);
+  return ContainsDirective(token_range);
 }
 
 static bool IgnoreWithinPortDeclarationPartitionGroup(
@@ -272,7 +265,7 @@ static bool IgnoreWithinStructUnionMemberPartitionGroup(
   }
 
   // ignore partitions belonging to preprocessing directives
-  if (StartsWithDirective(token_range) || ContainsDirective(token_range)) {
+  if (ContainsDirective(token_range)) {
     return true;
   }
 

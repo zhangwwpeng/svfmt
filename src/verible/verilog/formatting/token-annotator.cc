@@ -28,6 +28,7 @@
 #include "verible/common/text/syntax-tree-context.h"
 #include "verible/common/text/text-structure.h"
 #include "verible/common/text/token-info.h"
+#include "verible/common/text/tree-utils.h"
 #include "verible/common/util/logging.h"
 #include "verible/common/util/with-reason.h"
 #include "slang/syntax/AllSyntax.h"
@@ -153,7 +154,7 @@ static bool InRangeLikeContext(const SyntaxTreeContext &context) {
 // '/' between identifiers inside a macro argument is a filesystem path
 // (e.g. `INCLUDE(`PATH/src/file.sv)), not a division operator (issue #2352).
 static bool InMacroArgumentContext(const SyntaxTreeContext &context) {
-  return IsInside(context, SyntaxKind::MacroUsage);
+  return context.IsInside(svfmt::GroupKind::kMacroArgList);
 }
 
 static bool IsPathSeparatorSlashInMacroArg(
@@ -238,6 +239,7 @@ static WithReason<int> SpacesRequiredBetween(
   // "b[->1:2]" are not.
   const auto binary_arrow = [](const PreFormatToken &t, const SyntaxTreeContext &context) {
     return t.TokenEnum() == _TK_RARROW && !IsInside(context, SyntaxKind::SequenceRepetition) &&
+           !DirectParentIs(context, SyntaxKind::TransRepeatRange) &&
            !IsInside(context, SyntaxKind::BlockingEventTriggerStatement) &&
            !IsInside(context, SyntaxKind::NonblockingEventTriggerStatement);
   };
@@ -383,6 +385,12 @@ static WithReason<int> SpacesRequiredBetween(
     }
   }
 
+  if (DirectParentIs(left_context, SyntaxKind::TransRepeatRange) &&
+      (left.TokenEnum() == '*' || left.TokenEnum() == '=' ||
+       left.TokenEnum() == _TK_RARROW)) {
+    return {0, "Keep covergroup transition repetitions compact, e.g. [*2:4]"};
+  }
+
   // Add missing space around either side of all types of assignment operator.
   // "assign foo = bar;"  instead of "assign foo =bar;"
   // Consider assignment operators in the same class as binary operators.
@@ -478,6 +486,20 @@ static WithReason<int> SpacesRequiredBetween(
     return {0, "No space around cast operator '\\''"};
   }
 
+  // The type prefix of an assignment pattern binds to its opening "'{".
+  if (right.Text() == "'{" &&
+      AncestorKind(right_context, 1) == SyntaxKind::AssignmentPatternExpression) {
+    const auto *pattern = svfmt::NearestOfKind(
+        right_context, SyntaxKind::AssignmentPatternExpression);
+    const auto &node = verible::SymbolCastToNode(*pattern);
+    if (node.size() == 2 && node.front()) {
+      const auto *type_end = verible::GetRightmostLeaf(*node.front());
+      if (type_end != nullptr && type_end->get() == *left.token) {
+        return {0, "No space between a type and its assignment pattern"};
+      }
+    }
+  }
+
   if (right.TokenEnum() == '(') {
     // "#(" vs. "# (" for parameter formals and arguments
     if (left.TokenEnum() == '#') return {0, "Fuse \"#(\""};
@@ -554,6 +576,13 @@ static WithReason<int> SpacesRequiredBetween(
     return {0, "No space before '{' in most other contexts."};
   }
 
+  if (right.TokenEnum() == '[' &&
+      (DirectParentIs(right_context, SyntaxKind::SequenceRepetition) ||
+       DirectParentsAre(right_context, {SyntaxKind::ElementSelect,
+                                       SyntaxKind::ElementSelectExpression}))) {
+    return {0, "Attach a postfix selector or repetition to its operand"};
+  }
+
   // Handle padding around packed array dimensions like "type [N] id;"
   if ((left.format_token_enum == FormatTokenType::keyword ||
        left.format_token_enum == FormatTokenType::identifier) &&
@@ -564,6 +593,7 @@ static WithReason<int> SpacesRequiredBetween(
     // hang on the TypedefDeclaration.
     if ((DirectParentIs(right_context, SyntaxKind::VariableDimension) &&
          AncestorKind(right_context, 1) != SyntaxKind::Declarator &&
+         AncestorKind(right_context, 1) != SyntaxKind::InstanceName &&
          AncestorKind(right_context, 1) != SyntaxKind::TypedefDeclaration) ||
         (DirectParentIs(right_context, SyntaxKind::ElementSelect) &&
          InNamedTypeSelect(right_context))) {

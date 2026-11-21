@@ -448,6 +448,9 @@ static std::vector<std::pair<bool, size_t>> IntrinsicLineNumbers(std::string_vie
   return lines;
 }
 
+static verible::LineTerminatorStyle DetermineOutputLineTerminator(
+    verible::LineTerminatorOptionStyle from_options, std::string_view text);
+
 // svfmt: an inactive `ifdef / `else branch is kept verbatim when the branches
 // cannot be parsed together (e.g. a missing ',' that is an error only once
 // both branches are active). Such a branch is formatted on its own, inside a
@@ -595,7 +598,8 @@ constexpr BranchWrapper kBranchWrappers[] = {
 // lines at `indent`, or nothing if no wrapper parses it.
 std::optional<std::string> FormatBranch(std::string_view branch, std::optional<size_t> indent,
                                         const FormatStyle &style,
-                                        std::string_view filename) {
+                                        std::string_view filename,
+                                        std::string_view eol) {
   // A multi-line block comment would have its inner lines shifted: keep it.
   if (branch.find("/*") != std::string_view::npos && branch.find('\n') != std::string_view::npos) {
     return std::nullopt;
@@ -644,9 +648,6 @@ std::optional<std::string> FormatBranch(std::string_view branch, std::optional<s
     const bool shift_right = target >= base;
     const size_t shift = shift_right ? target - base : base - target;
 
-    // svfmt: the branch keeps its line terminators (CRLF stays CRLF).
-    const std::string_view eol =
-        branch.find("\r\n") != std::string_view::npos ? "\r\n" : "\n";
     std::string result;
     for (size_t i = body_begin; i < body_end; ++i) {
       std::string_view line = lines[i];
@@ -704,6 +705,11 @@ std::string PreformatDisabledBranchesOnce(std::string_view text, std::string_vie
     ranges.emplace_back(static_cast<size_t>(begin), static_cast<size_t>(end));
   }
   const auto lines = LinesWithOffsets(*formatted);
+  const std::string_view eol =
+      DetermineOutputLineTerminator(style.line_terminator, text) ==
+              verible::LineTerminatorStyle::kCRLF
+          ? "\r\n"
+          : "\n";
   std::vector<std::optional<size_t>> indents;
   for (const auto &range : ranges) indents.push_back(GroupIndent(lines, range, ranges));
 
@@ -721,7 +727,7 @@ std::string PreformatDisabledBranchesOnce(std::string_view text, std::string_vie
       continue;
     }
     const std::string branch = out.substr(begin, end - begin);
-    if (auto replacement = FormatBranch(branch, indents[i], style, filename)) {
+    if (auto replacement = FormatBranch(branch, indents[i], style, filename, eol)) {
       out.replace(begin, end - begin, *replacement);
     }
   }
@@ -1238,6 +1244,10 @@ static void DisableSyntaxBasedRanges(ByteOffsetSet *disabled_ranges,
   **/
 }
 
+static std::optional<std::string> ShiftedBlockComment(
+    const verible::FormattedExcerpt &line, std::string_view full_text,
+    const ByteOffsetSet &disabled_ranges);
+
 // Keeps multi-line EOL comments aligned to the same column.
 //
 // When a line containing nothing else than a single EOL comment follows a line
@@ -1246,8 +1256,8 @@ static void DisableSyntaxBasedRanges(ByteOffsetSet *disabled_ranges,
 // no more than kMaxColumnDifference, the comment in the comment-only line is
 // considered to be a continuation comment. The same check is performed on all
 // following comment-only lines. The process of continuation detection ends when
-// currently handled line has any tokens other than EOL comment, or when the
-// comment's starting column differs too much from the first comment's column.
+// currently handled line has any tokens other than EOL comment, a blank line
+// separates the comments, or their starting columns differ too much.
 // All continuation comments are placed in the same column as their starting
 // comment's column in formatted output.
 class ContinuationCommentAligner {
@@ -1257,8 +1267,11 @@ class ContinuationCommentAligner {
 
  public:
   ContinuationCommentAligner(const verible::LineColumnMap &line_column_map,
-                             const std::string_view base_text)
-      : line_column_map_(line_column_map), base_text_(base_text) {}
+                             std::string_view base_text,
+                             const ByteOffsetSet &disabled_ranges)
+      : line_column_map_(line_column_map),
+        base_text_(base_text),
+        disabled_ranges_(disabled_ranges) {}
 
   void Reset() {
     formatted_column_ = kInvalidColumn;
@@ -1299,6 +1312,19 @@ class ContinuationCommentAligner {
 
     const auto &previous_line = already_formatted_lines->back();
     VLOG(4) << __FUNCTION__ << ": previous line: " << previous_line;
+    const auto *comment = uwline.TokensRange().back().token;
+    if (!previous_line.Tokens().empty()) {
+      const auto *previous_token = previous_line.Tokens().back().token;
+      const auto previous_end = line_column_map_.GetLineColAtOffset(
+          base_text_, previous_token->right(base_text_));
+      const auto comment_start = line_column_map_.GetLineColAtOffset(
+          base_text_, comment->left(base_text_));
+      if (comment_start.line - previous_end.line > 1) {
+        formatted_column_ = kInvalidColumn;
+        original_column_ = kInvalidColumn;
+        return false;
+      }
+    }
     if (original_column_ == kInvalidColumn) {
       if (previous_line.Tokens().size() <= 1) {
         VLOG(4) << "Not a continuation comment line: "
@@ -1322,7 +1348,6 @@ class ContinuationCommentAligner {
       original_column_ = GetTokenColumn(previous_comment);
     }
 
-    const auto *comment = uwline.TokensRange().back().token;
     const int comment_column = GetTokenColumn(comment);
 
     VLOG(4) << "Original column: " << original_column_ << " vs. "
@@ -1406,7 +1431,7 @@ class ContinuationCommentAligner {
     }
   }
 
-  static int CalculateEolCommentColumn(const verible::FormattedExcerpt &line) {
+  int CalculateEolCommentColumn(const verible::FormattedExcerpt &line) const {
     // Compute the starting column of the trailing EOL comment the same way
     // FormattedExcerpt::FormattedText emits spaces, including:
     //   * wrap indents (SpacingDecision::kWrap), and
@@ -1427,7 +1452,9 @@ class ContinuationCommentAligner {
     }
     // svfmt: in characters, as the original column it is compared with
     // (GetTokenColumn counts UTF-8 code points).
-    AddTokenWidth(front.token->text(), &column);
+    const auto shifted = ShiftedBlockComment(line, base_text_, disabled_ranges_);
+    AddTokenWidth(shifted ? std::string_view(*shifted) : front.token->text(),
+                  &column);
 
     const auto &tokens = line.Tokens();
     for (size_t i = 1; i < tokens.size(); ++i) {
@@ -1446,6 +1473,7 @@ class ContinuationCommentAligner {
 
   const verible::LineColumnMap &line_column_map_;
   const std::string_view base_text_;
+  const ByteOffsetSet &disabled_ranges_;
 
   // Used when the most recenly handled line can't have a continuation comment.
   static constexpr int kInvalidColumn = -1;
@@ -1737,7 +1765,7 @@ Status Formatter::Format(const ExecutionControl &control) {
   std::vector<const UnwrappedLine *> partially_formatted_lines;
   formatted_lines_.reserve(unwrapped_lines.size());
   ContinuationCommentAligner continuation_comment_aligner(
-      text_structure_.GetLineColumnMap(), text_structure_.Contents());
+      text_structure_.GetLineColumnMap(), full_text, disabled_ranges_);
   for (const auto &uwline : unwrapped_lines) {
     // TODO(fangism): Use different formatting strategies depending on
     // uwline.PartitionPolicy().
@@ -1940,8 +1968,9 @@ static verible::LineTerminatorStyle DetermineOutputLineTerminator(
 // of its original line and now starts at another column, returns the comment
 // with every continuation line shifted by the same number of columns. Returns
 // nothing when a line would lose non-space characters or uses tabs.
-static std::optional<std::string> ShiftedBlockComment(const verible::FormattedExcerpt &line,
-                                                      std::string_view full_text) {
+static std::optional<std::string> ShiftedBlockComment(
+    const verible::FormattedExcerpt &line, std::string_view full_text,
+    const ByteOffsetSet &disabled_ranges) {
   const verible::FormattedToken &front = line.Tokens().front();
   const std::string_view comment = front.token->text();
   if (front.token->token_enum() != TK_COMMENT_BLOCK ||
@@ -1950,6 +1979,11 @@ static std::optional<std::string> ShiftedBlockComment(const verible::FormattedEx
     return std::nullopt;
   }
   const size_t offset = front.token->left(full_text);
+  const auto disabled = disabled_ranges.LowerBound(offset);
+  if (disabled != disabled_ranges.end() &&
+      disabled->first < front.token->right(full_text)) {
+    return std::nullopt;
+  }
   const size_t line_begin = offset == 0 ? 0 : full_text.rfind('\n', offset - 1) + 1;
   const std::string_view prefix = full_text.substr(line_begin, offset - line_begin);
   if (prefix.find_first_not_of(' ') != std::string_view::npos) return std::nullopt;
@@ -2003,6 +2037,9 @@ void Formatter::Emit(bool include_disabled, std::ostream &stream) const {
   int position = 0;  // tracks with the position in the original full_text
   const verible::TokenInfo *previous_token = nullptr;
   bool previous_closes_block = false;
+  bool previous_closes_macro = false;
+  bool macro_open_pending = false;
+  int macro_depth = 0;
   const auto closes_block = [](const verible::FormattedToken &token) {
     const auto kind = static_cast<verilog_tokentype>(token.token->token_enum());
     return IsEndKeyword(kind) || kind == TK_join || kind == TK_join_any ||
@@ -2017,11 +2054,12 @@ void Formatter::Emit(bool include_disabled, std::ostream &stream) const {
                               : line.Tokens().front().token->left(full_text);
     const std::string_view leading_whitespace(
         full_text.substr(position, front_offset - position));
-    // An inline semicolon after a closing keyword is a separate empty
+    // An inline semicolon after a block or macro can be a separate empty
     // statement. Keep it on its original line when the formatter built a
     // separate excerpt for it.
     const bool attach_semicolon =
-        previous_closes_block && !line.Tokens().empty() &&
+        (previous_closes_block || previous_closes_macro) &&
+        !line.Tokens().empty() &&
         line.Tokens().front().token->token_enum() == ';' &&
         leading_whitespace.find_first_of("\r\n") == std::string_view::npos &&
         !disabled_ranges_.Contains(previous_token->left(full_text)) &&
@@ -2038,12 +2076,8 @@ void Formatter::Emit(bool include_disabled, std::ostream &stream) const {
     // being printed twice.
     if (!line.Tokens().empty()) {
       const bool indent = !attach_semicolon && !disabled_ranges_.Contains(front_offset);
-      const auto disabled = disabled_ranges_.LowerBound(front_offset);
-      const bool front_fully_enabled =
-          disabled == disabled_ranges_.end() ||
-          disabled->first >= line.Tokens().front().token->right(full_text);
-      const auto shifted = indent && front_fully_enabled
-                               ? ShiftedBlockComment(line, full_text)
+      const auto shifted = indent
+                               ? ShiftedBlockComment(line, full_text, disabled_ranges_)
                                : std::nullopt;
       if (shifted) {
         // The line starts with a multi-line block comment that moved: its
@@ -2059,8 +2093,19 @@ void Formatter::Emit(bool include_disabled, std::ostream &stream) const {
         line.FormattedText(stream, indent, include_token_p, out_terminator);
       }
       const auto &tokens = line.Tokens();
+      for (const auto &token : tokens) {
+        const int kind = token.token->token_enum();
+        previous_closes_macro = false;
+        if (kind == '(' && (macro_open_pending || macro_depth > 0)) {
+          ++macro_depth;
+        } else if (kind == ')' && macro_depth > 0) {
+          previous_closes_macro = --macro_depth == 0;
+        }
+        macro_open_pending = kind == MacroCallId ||
+            (macro_open_pending && IsComment(verilog_tokentype(kind)));
+      }
       previous_closes_block =
-          closes_block(tokens.back()) ||
+          closes_block(tokens.back()) || tokens.back().token->token_enum() == '}' ||
           (tokens.size() >= 3 && tokens[tokens.size() - 2].token->token_enum() == ':' &&
            closes_block(tokens[tokens.size() - 3]));
       previous_token = tokens.back().token;

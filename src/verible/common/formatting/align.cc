@@ -1111,9 +1111,11 @@ std::vector<TokenPartitionIterator> FilterAlignablePartitions(
     // svfmt: a row with a forced line break inside ("f(1,  // c" then "2);")
     // spans several lines; aligning it would join them.
     const auto tokens = iter->Value().TokensRange();
-    const bool multiline =
-        !tokens.empty() && std::any_of(tokens.begin() + 1, tokens.end(), [](const PreFormatToken &t) {
-          return t.before.break_decision == SpacingOptions::kMustWrap;
+    const bool multiline = std::any_of(
+        tokens.begin(), tokens.end(), [&tokens](const PreFormatToken &token) {
+          return token.Text().find_first_of("\r\n") != std::string_view::npos ||
+                 (&token != &tokens.front() &&
+                  token.before.break_decision == SpacingOptions::kMustWrap);
         });
     if (!multiline && !ignore_partition_predicate(*iter)) {
       VLOG(2) << "including partition: " << *iter;

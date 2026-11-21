@@ -1238,9 +1238,20 @@ void TreeUnwrapper::SetIndentationsAndCreatePartitions(
         VisitIndentedSection(node, style_.indentation_spaces, PartitionPolicyEnum::kAlwaysExpand);
         return;
       // Inactive branch text keeps the indentation of the list it is in.
-      case GroupKind::kDisabledBranch:
+      case GroupKind::kDisabledBranch: {
+        const auto *first = verible::GetLeftmostLeaf(node);
+        if (first != nullptr) {
+          const auto text = first->get().text();
+          const auto directive = text.substr(0, text.find_first_of(" \t\r\n("));
+          if (directive == "`ifdef" || directive == "`ifndef" ||
+              directive == "`elsif" || directive == "`else" || directive == "`endif") {
+            VisitNewUnindentedUnwrappedLine(node);
+            return;
+          }
+        }
         VisitIndentedSection(node, 0, PartitionPolicyEnum::kFitOnLineElseExpand);
         return;
+      }
       case GroupKind::kSubroutineHeader:
         if (svfmt::IsInsideAnyOf(Context(),
                                  {SyntaxKind::DPIImport, SyntaxKind::DPIExport}) ||
@@ -2429,9 +2440,16 @@ static void ReshapeAssertion(const FormatStyle &style, TokenPartitionTree *parti
     if (header.empty() || header.back().TokenEnum() != ')') continue;
     auto &first = LeftmostDescendant(child);
     const auto tokens = first.Value().TokensRange();
-    if (tokens.size() != 2 || tokens.front().TokenEnum() != verilog_tokentype::TK_else ||
-        tokens.back().TokenEnum() != verilog_tokentype::TK_begin) {
-      continue;
+    if (tokens.empty() || tokens.front().TokenEnum() != TK_else ||
+        PartitionIsForcedIntoNewLine(first)) continue;
+    const bool else_begin = tokens.size() == 2 && tokens.back().TokenEnum() == TK_begin;
+    if (!else_begin) {
+      if (tokens.size() != 1 || verible::FitsOnLine(child.Value(), style).fits) {
+        continue;
+      }
+      verible::UnwrappedLine joined(children[i - 1].Value());
+      joined.SpanUpToToken(tokens.end());
+      if (!verible::FitsOnLine(joined, style).fits) continue;
     }
     verible::MergeLeafIntoPreviousLeaf(&first);
     FlattenOneChild(*partition_ptr, i);
@@ -3083,6 +3101,44 @@ static size_t InstanceCount(const SyntaxTreeNode &node) {
   return 0;
 }
 
+// Keep the concatenated target and assignment operator together when they fit.
+static bool KeepFittingAssignmentTarget(const SyntaxTreeNode &statement,
+                                        const FormatStyle &style,
+                                        TokenPartitionTree *partition) {
+  const auto *assignment = LastChildNode(statement);
+  if (assignment == nullptr || !svfmt::IsAssignmentKind(Kind(*assignment)) ||
+      assignment->size() < 2 || !assignment->front() || !(*assignment)[1] ||
+      Kind(*assignment->front()) != SyntaxKind::ConcatenationExpression) return false;
+
+  auto &children = partition->Children();
+  if (children.size() < 3 || !is_leaf(children[0]) || is_leaf(children[1]) ||
+      !is_leaf(children[2])) return false;
+  const auto opening = children[0].Value().TokensRange();
+  const auto closing = children[2].Value().TokensRange();
+  if (opening.size() != 1 || opening.front().TokenEnum() != '{' ||
+      closing.size() < 2 || closing.front().TokenEnum() != '}') return false;
+  const auto *target_end = verible::GetRightmostLeaf(*assignment->front());
+  if (target_end == nullptr || target_end->get() != *closing.front().token) return false;
+  const auto *op = verible::GetLeftmostLeaf(*(*assignment)[1]);
+  if (op == nullptr || op->get() != *(closing.begin() + 1)->token) return false;
+
+  verible::UnwrappedLine header(children[0].Value());
+  const auto rhs_start = closing.begin() + 2;
+  header.SpanUpToToken(rhs_start);
+  if (!verible::FitsOnLine(header, style).fits) return false;
+
+  auto tail = children[2].Value();
+  children[0].Value() = header;
+  children.erase(children.begin() + 1, children.begin() + 3);
+  if (rhs_start != closing.end()) {
+    tail.SpanBackToToken(rhs_start);
+    tail.SetIndentationSpaces(header.IndentationSpaces() + style.wrap_spaces);
+    tail.SetPartitionPolicy(PartitionPolicyEnum::kFitOnLineElseExpand);
+    children.insert(children.begin() + 1, TokenPartitionTree(tail));
+  }
+  return true;
+}
+
 static void HandleDataDeclaration(const SyntaxTreeNode &node,
                                   const FormatStyle &style,
                                   TokenPartitionTree *partition) {
@@ -3091,6 +3147,22 @@ static void HandleDataDeclaration(const SyntaxTreeNode &node,
   auto &children = data_declaration_partition.Children();
   // svfmt: a declaration expanded from a macro leaves only its ';' here.
   if (children.empty()) return;
+
+  if (children.size() == 2 && Kind(node) == SyntaxKind::DataDeclaration &&
+      !is_leaf(children.front()) && InstanceCount(node) > 1) {
+    auto &closing = RightmostDescendant(children.front());
+    auto &declarators = children.back();
+    const auto tokens = declarators.Value().TokensRange();
+    if (PartitionIsCloseBrace(closing) && !tokens.empty()) {
+      verible::UnwrappedLine joined(closing.Value());
+      joined.SpanUpToToken(tokens.end());
+      if (verible::FitsOnLine(joined, style).fits) {
+        declarators.Children().clear();
+        verible::MergeLeafIntoPreviousLeaf(&declarators);
+        return;
+      }
+    }
+  }
 
   // The instances/variable declaration list is always in last position.
   auto &instance_list_partition = children.back();
@@ -3483,6 +3555,7 @@ void TreeUnwrapper::ReshapeTokenPartitions(
               MergeLeafIntoPreviousLeafWithin(partition, &last);
             }
           }
+          SeparateLeadingComments(&partition);
         } else if (policy == PartitionPolicyEnum::kStack) {
           MacroCallReshaper(style, &partition).Reshape();
         }
@@ -3581,6 +3654,23 @@ void TreeUnwrapper::ReshapeTokenPartitions(
         break;
       }
 
+      case SyntaxKind::ReturnStatement: {
+        AttachTrailingSemicolonToPreviousPartition(&partition);
+        auto &children = partition.Children();
+        for (size_t i = 1; i < children.size(); ++i) {
+          const auto previous = children[i - 1].Value().TokensRange();
+          auto &opening = LeftmostDescendant(children[i]);
+          const auto tokens = opening.Value().TokensRange();
+          if (!is_leaf(children[i - 1]) || previous.empty() ||
+              previous.back().TokenEnum() != TK_return || tokens.empty() ||
+              tokens.front().Text() != "'{" ||
+              PartitionIsForcedIntoNewLine(opening)) continue;
+          verible::MergeLeafIntoPreviousLeaf(&opening);
+          break;
+        }
+        break;
+      }
+
       // kNetVariableAssignment, kBlockingAssignmentStatement,
       // kNonblockingAssignmentStatement, kAssignModifyStatement, kStatement
       case SyntaxKind::ExpressionStatement:
@@ -3591,6 +3681,32 @@ void TreeUnwrapper::ReshapeTokenPartitions(
         AttachTrailingSemicolonToPreviousPartition(&partition);
         // RHS may have been further partitioned, e.g. a macro call.
         auto &children = partition.Children();
+        if (kind == SyntaxKind::ExpressionStatement &&
+            KeepFittingAssignmentTarget(node, style, &partition)) break;
+        for (size_t i = 0; i + 1 < children.size(); ++i) {
+          const auto op = children[i].Value().TokensRange();
+          const auto *origin = children[i + 1].Value().Origin();
+          if (!is_leaf(children[i]) || op.empty() || origin == nullptr ||
+              Kind(*origin) != SyntaxKind::MacroUsage) continue;
+          auto &macro = children[i + 1];
+          if (op.back().TokenEnum() == '?') {
+            const int indent = partition.Value().IndentationSpaces() + style.wrap_spaces;
+            verible::AdjustIndentationAbsolute(&macro, indent);
+            auto &first = LeftmostDescendant(macro);
+            if (op.size() > 1 && !PartitionIsForcedIntoNewLine(first)) {
+              auto question = children[i].Value();
+              question.SpanBackToToken(op.end() - 1);
+              question.SetIndentationSpaces(indent);
+              children[i].Value().SpanUpToToken(op.end() - 1);
+              children.insert(children.begin() + i + 1, TokenPartitionTree(question));
+              verible::MergeLeafIntoNextLeaf(&children[i + 1]);
+            }
+          } else if (op.size() == 1 && op.front().TokenEnum() == ':' &&
+                     !PartitionIsForcedIntoNewLine(LeftmostDescendant(macro))) {
+            verible::AdjustIndentationAbsolute(&macro, children[i].Value().IndentationSpaces());
+            verible::MergeLeafIntoNextLeaf(&children[i]);
+          }
+        }
         if (children.size() == 2 && verible::is_leaf(children.front()) &&
             !PartitionIsForcedIntoNewLine(children.back())) {
           verible::MergeLeafIntoNextLeaf(&children.front());
@@ -3602,13 +3718,26 @@ void TreeUnwrapper::ReshapeTokenPartitions(
         std::vector<size_t> offsets;
         FlattenOnlyChildrenWithChildren(partition, &offsets);
         AttachTrailingSemicolonToPreviousPartition(&partition);
+        const auto *tbody = LastChildNode(node);
+        if (tbody != nullptr && Kind(*tbody) == SyntaxKind::ParallelBlockStatement) {
+          partition.Value().SetPartitionPolicy(PartitionPolicyEnum::kAlwaysExpand);
+          auto &children = partition.Children();
+          if (offsets.size() > 1 && offsets[1] > 0 && offsets[1] < children.size()) {
+            auto &fork = children[offsets[1]];
+            const auto tokens = fork.Value().TokensRange();
+            if (is_leaf(fork) && !tokens.empty() && tokens.front().TokenEnum() == TK_fork &&
+                !PartitionIsForcedIntoNewLine(fork)) {
+              verible::MergeLeafIntoPreviousLeaf(&fork);
+            }
+          }
+        }
         // Check body, for a begin-end block, merge 'begin' with previous sibling
-        if (const auto *tbody = LastChildNode(node);
-            tbody != nullptr && NodeIsBeginEndBlock(*tbody) && offsets.size() > 1) {
+        if (tbody != nullptr && NodeIsBeginEndBlock(*tbody) && offsets.size() > 1) {
           // A comment line before 'begin' makes the body a group; leave it.
           const auto &children = partition.Children();
           const size_t pos = offsets[1] - 1;
           if (pos + 1 < children.size() &&
+              !PartitionIsForcedIntoNewLine(LeftmostDescendant(children[pos + 1])) &&
               children[pos].Children().empty() == children[pos + 1].Children().empty()) {
             verible::MergeConsecutiveSiblings(&partition, pos);
           }
@@ -3782,6 +3911,12 @@ void TreeUnwrapper::ReshapeTokenPartitions(
           verible::MergeLeafIntoNextLeaf(&partition.Children().front());
           verible::AdjustIndentationAbsolute(&partition.Children().front(),
                                              partition.Value().IndentationSpaces());
+          if (Kind(*body) == SyntaxKind::TimingControlStatement) {
+            const auto *timed_body = LastChildNode(*body);
+            if (timed_body != nullptr && Kind(*timed_body) == SyntaxKind::ParallelBlockStatement) {
+              partition.Value().SetPartitionPolicy(PartitionPolicyEnum::kAlwaysExpand);
+            }
+          }
         }
         break;
       }
